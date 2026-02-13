@@ -6,7 +6,7 @@
 - `src-tauri/` contains the Rust host app (`src/main.rs` desktop entry, `src/lib.rs` Tauri commands/plugins, `tauri.conf.json` runtime/build config, `icons/` app icons).
 - Generated output lives in `dist/` (frontend) and `src-tauri/target/` (Rust build artifacts). Treat both as build output, not source.
 
-## Build, Test, and Development Commands
+## Build, Test, and Development Commands 
 - `pnpm install`: install JavaScript dependencies.
 - `pnpm dev`: run Vite dev server (`http://localhost:1420`).
 - `pnpm tauri dev`: run the full desktop app (Vite + Rust backend).

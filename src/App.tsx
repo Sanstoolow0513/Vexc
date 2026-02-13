@@ -6,8 +6,11 @@ import {
   useState,
 } from "react";
 import Editor from "@monaco-editor/react";
+import { File, Folder, FolderOpen } from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -44,15 +47,16 @@ interface PendingPosition {
 
 function App() {
   const [workspace, setWorkspaceState] = useState<WorkspaceInfo | null>(null);
-  const [workspaceInput, setWorkspaceInput] = useState("");
 
   const [treeByPath, setTreeByPath] = useState<Record<string, FileNode[]>>({});
   const [expandedByPath, setExpandedByPath] = useState<Record<string, boolean>>({});
   const [loadingByPath, setLoadingByPath] = useState<Record<string, boolean>>({});
+  const [openingFilesByPath, setOpeningFilesByPath] = useState<Record<string, boolean>>({});
 
   const [tabs, setTabs] = useState<EditorTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const tabsRef = useRef<EditorTab[]>([]);
+  const openFileRequestsRef = useRef<Record<string, Promise<string | null>>>({});
 
   const [terminals, setTerminals] = useState<TerminalSession[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
@@ -64,6 +68,9 @@ function App() {
   const [pendingPosition, setPendingPosition] = useState<PendingPosition | null>(null);
   const [editorReadySeq, setEditorReadySeq] = useState(0);
   const [statusMessage, setStatusMessage] = useState("Ready");
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+
+  const appWindow = useMemo(() => getCurrentWindow(), []);
 
   const monacoEditorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const terminalRef = useRef<XtermTerminal | null>(null);
@@ -106,6 +113,25 @@ function App() {
       ...previous,
       [path]: loading,
     }));
+  }
+
+  function setFileOpening(path: string, opening: boolean): void {
+    setOpeningFilesByPath((previous) => {
+      if (opening) {
+        return {
+          ...previous,
+          [path]: true,
+        };
+      }
+
+      if (!previous[path]) {
+        return previous;
+      }
+
+      const next = { ...previous };
+      delete next[path];
+      return next;
+    });
   }
 
   async function loadDirectory(path: string): Promise<void> {
@@ -232,11 +258,12 @@ function App() {
     try {
       const info = await setWorkspace(normalizedPath);
       setWorkspaceState(info);
-      setWorkspaceInput(info.rootPath);
       localStorage.setItem(WORKSPACE_STORAGE_KEY, info.rootPath);
 
       setTabs([]);
       setActiveTabId(null);
+      openFileRequestsRef.current = {};
+      setOpeningFilesByPath({});
 
       setTreeByPath({});
       setExpandedByPath({ [info.rootPath]: true });
@@ -271,28 +298,52 @@ function App() {
       return existing.id;
     }
 
-    try {
-      const file = await readFile(path);
-      const tab: EditorTab = {
-        id: file.path,
-        path: file.path,
-        title: fileNameFromPath(file.path),
-        content: file.content,
-        savedContent: file.content,
-        language: detectLanguage(file.path),
-      };
-
-      setTabs((previous) => [...previous, tab]);
-      setActiveTabId(tab.id);
-
-      if (caret) {
-        setPendingPosition({ tabId: tab.id, line: caret.line, column: caret.column });
+    const inFlightRequest = openFileRequestsRef.current[path];
+    if (inFlightRequest) {
+      const tabId = await inFlightRequest;
+      if (tabId && caret) {
+        setPendingPosition({ tabId, line: caret.line, column: caret.column });
       }
+      return tabId;
+    }
 
-      return tab.id;
-    } catch (error) {
-      setStatusMessage(`Failed to open file: ${String(error)}`);
-      return null;
+    const request = (async (): Promise<string | null> => {
+      setFileOpening(path, true);
+      setStatusMessage(`Opening ${fileNameFromPath(path)}...`);
+
+      try {
+        const file = await readFile(path);
+        const tab: EditorTab = {
+          id: file.path,
+          path: file.path,
+          title: fileNameFromPath(file.path),
+          content: file.content,
+          savedContent: file.content,
+          language: detectLanguage(file.path),
+        };
+
+        setTabs((previous) => [...previous, tab]);
+        setActiveTabId(tab.id);
+        setStatusMessage(`Opened ${tab.title}`);
+
+        if (caret) {
+          setPendingPosition({ tabId: tab.id, line: caret.line, column: caret.column });
+        }
+
+        return tab.id;
+      } catch (error) {
+        setStatusMessage(`Failed to open file: ${String(error)}`);
+        return null;
+      } finally {
+        setFileOpening(path, false);
+      }
+    })();
+
+    openFileRequestsRef.current[path] = request;
+    try {
+      return await request;
+    } finally {
+      delete openFileRequestsRef.current[path];
     }
   }
 
@@ -440,17 +491,90 @@ function App() {
     monacoEditorRef.current = editor;
     setEditorReadySeq((value) => value + 1);
 
+    // 定义 One Dark Pro 自定义主题
+    monacoApi.editor.defineTheme('one-dark-pro-orange', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'keyword', foreground: 'c678dd' },
+        { token: 'variable', foreground: 'e06c75' },
+        { token: 'string', foreground: '98c379' },
+        { token: 'function', foreground: '61afef' },
+        { token: 'number', foreground: 'd19a66' },
+        { token: 'comment', foreground: '5c6370', fontStyle: 'italic' },
+        { token: 'type', foreground: 'e5c07b' },
+      ],
+      colors: {
+        'editor.background': '#0a0c10',
+        'editor.foreground': '#abb2bf',
+        'editorCursor.foreground': '#d19a66',
+        'editor.lineHighlightBackground': '#13161c',
+        'editor.selectionBackground': '#2c313a',
+        'editor.inactiveSelectionBackground': '#1c1f26',
+      }
+    });
+
+    monacoApi.editor.setTheme('one-dark-pro-orange');
+
     editor.addCommand(monacoApi.KeyMod.CtrlCmd | monacoApi.KeyCode.KeyS, () => {
       void saveTab();
     });
   }
 
-  function promptWorkspacePath(): void {
-    const suggested = workspaceInput || workspace?.rootPath || "";
-    const path = window.prompt("Enter workspace absolute path", suggested);
-    if (path && path.trim()) {
-      setWorkspaceInput(path);
-      void openWorkspaceByPath(path);
+  async function promptWorkspacePath(): Promise<void> {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择工作区目录",
+      });
+
+      if (selected && typeof selected === "string") {
+        await openWorkspaceByPath(selected);
+      }
+    } catch (error) {
+      setStatusMessage(`Failed to open directory dialog: ${String(error)}`);
+    }
+  }
+
+  async function refreshWindowMaximizedState(): Promise<void> {
+    try {
+      const maximized = await appWindow.isMaximized();
+      setIsWindowMaximized(maximized);
+    } catch {
+      setIsWindowMaximized(false);
+    }
+  }
+
+  async function handleWindowMinimize(): Promise<void> {
+    try {
+      await appWindow.minimize();
+    } catch (error) {
+      setStatusMessage(`Failed to minimize window: ${String(error)}`);
+    }
+  }
+
+  async function handleWindowToggleMaximize(): Promise<void> {
+    try {
+      await appWindow.toggleMaximize();
+      await refreshWindowMaximizedState();
+    } catch (error) {
+      setStatusMessage(`Failed to toggle maximize: ${String(error)}`);
+    }
+  }
+
+  async function handleWindowClose(): Promise<void> {
+    if (hasDirtyTabs) {
+      const confirmed = window.confirm("You have unsaved tabs. Close the window anyway?");
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    try {
+      await appWindow.close();
+    } catch (error) {
+      setStatusMessage(`Failed to close window: ${String(error)}`);
     }
   }
 
@@ -459,6 +583,7 @@ function App() {
       const isDirectory = node.kind === "directory";
       const expanded = Boolean(expandedByPath[node.path]);
       const loading = Boolean(loadingByPath[node.path]);
+      const openingFile = !isDirectory && Boolean(openingFilesByPath[node.path]);
 
       return (
         <div key={node.path}>
@@ -466,6 +591,7 @@ function App() {
             type="button"
             className={`tree-item ${activeTab?.path === node.path ? "active" : ""}`}
             style={{ paddingLeft: `${8 + depth * 14}px` }}
+            disabled={loading || openingFile}
             onClick={() => {
               if (isDirectory) {
                 const nextExpanded = !expanded;
@@ -483,9 +609,16 @@ function App() {
               void openFile(node.path);
             }}
           >
-            <span className="tree-marker">{isDirectory ? (expanded ? "-" : "+") : "|"}</span>
+            <span className="tree-marker">
+              {isDirectory ? (
+                expanded ? <FolderOpen size={14} /> : <Folder size={14} />
+              ) : (
+                <File size={14} />
+              )}
+            </span>
             <span className="tree-label">{node.name}</span>
             {isDirectory && loading ? <span className="tree-loading">loading...</span> : null}
+            {openingFile ? <span className="tree-loading">opening...</span> : null}
           </button>
 
           {isDirectory && expanded && treeByPath[node.path]
@@ -510,9 +643,26 @@ function App() {
       lineHeight: 1.2,
       allowTransparency: true,
       theme: {
-        background: "#090d14",
-        foreground: "#d9e3f8",
-        cursor: "#f5d076",
+        background: "#000000",
+        foreground: "#abb2bf",
+        cursor: "#d19a66",
+        selectionBackground: "rgba(209, 154, 102, 0.2)",
+        black: "#000000",
+        red: "#e06c75",
+        green: "#98c379",
+        yellow: "#e5c07b",
+        blue: "#61afef",
+        magenta: "#c678dd",
+        cyan: "#56b6c2",
+        white: "#abb2bf",
+        brightBlack: "#4b5263",
+        brightRed: "#e06c75",
+        brightGreen: "#98c379",
+        brightYellow: "#e5c07b",
+        brightBlue: "#61afef",
+        brightMagenta: "#c678dd",
+        brightCyan: "#56b6c2",
+        brightWhite: "#abb2bf",
       },
       scrollback: 20000,
     });
@@ -585,6 +735,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    void refreshWindowMaximizedState();
+
+    const focusHandler = () => {
+      void refreshWindowMaximizedState();
+    };
+
+    window.addEventListener("focus", focusHandler);
+    return () => {
+      window.removeEventListener("focus", focusHandler);
+    };
+  }, [appWindow]);
+
+  useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -643,31 +806,49 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className="window-bar">
+        <div className="window-drag" data-tauri-drag-region>
+          <span className="brand-label">VEXC</span>
+          <span className="workspace-current">{workspace ? workspace.rootName : "No workspace"}</span>
+        </div>
+
         <div className="workspace-controls">
-          <label htmlFor="workspace-path">Workspace</label>
-          <input
-            id="workspace-path"
-            value={workspaceInput}
-            onChange={(event) => setWorkspaceInput(event.currentTarget.value)}
-            placeholder="C:\\Users\\...\\project"
-          />
-          <button type="button" onClick={() => void openWorkspaceByPath(workspaceInput)}>
-            Open
+          <button type="button" className="primary" onClick={() => void promptWorkspacePath()}>
+            选择目录
           </button>
-          <button type="button" className="secondary" onClick={promptWorkspacePath}>
-            Prompt
+          <button type="button" className="secondary" onClick={() => void createTerminalSession()}>
+            新建终端
+          </button>
+          <button type="button" className="primary" onClick={() => void saveTab()} disabled={!activeTab}>
+            保存
           </button>
         </div>
 
-        <div className="topbar-actions">
-          <button type="button" className="secondary" onClick={() => void createTerminalSession()}>
-            New Terminal
+        <div className="window-controls">
+          <button
+            type="button"
+            className="window-control"
+            aria-label="Minimize window"
+            onClick={() => void handleWindowMinimize()}
+          >
+            <span className="window-glyph min" />
           </button>
-          <button type="button" onClick={() => void saveTab()} disabled={!activeTab}>
-            Save
+          <button
+            type="button"
+            className="window-control"
+            aria-label={isWindowMaximized ? "Restore window" : "Maximize window"}
+            onClick={() => void handleWindowToggleMaximize()}
+          >
+            <span className={`window-glyph ${isWindowMaximized ? "restore" : "max"}`} />
           </button>
-          <span className="workspace-name">{workspace ? workspace.rootName : "No workspace"}</span>
+          <button
+            type="button"
+            className="window-control close"
+            aria-label="Close window"
+            onClick={() => void handleWindowClose()}
+          >
+            <span className="window-glyph close" />
+          </button>
         </div>
       </header>
 
@@ -690,7 +871,9 @@ function App() {
                   }
                 }}
               >
-                <span className="tree-marker">{expandedByPath[workspace.rootPath] ? "-" : "+"}</span>
+                <span className="tree-marker">
+                  {expandedByPath[workspace.rootPath] ? <FolderOpen size={14} /> : <Folder size={14} />}
+                </span>
                 <span className="tree-label">{workspace.rootName}</span>
               </button>
               {expandedByPath[workspace.rootPath] ? (
@@ -726,7 +909,7 @@ function App() {
                   value={activeTab.content}
                   onMount={handleEditorMount}
                   onChange={(value) => updateActiveTabContent(value ?? "")}
-                  theme="vs-dark"
+                  theme="one-dark-pro-orange"
                   className="editor-monaco"
                   height="100%"
                   options={{
@@ -787,7 +970,20 @@ function App() {
         </section>
       </div>
 
-      <footer className="statusbar">{statusMessage}</footer>
+      <footer className="statusbar">
+        <div className="statusbar-section statusbar-left">
+          <span className="statusbar-icon">ℹ️</span>
+          <span>{statusMessage || "Ready"}</span>
+        </div>
+
+        <div className="statusbar-section statusbar-center">
+          <span className="statusbar-path">{workspace?.rootPath || "No workspace"}</span>
+        </div>
+
+        <div className="statusbar-section statusbar-right">
+          {/* 预留空间，可显示编码、语言、行列等信息 */}
+        </div>
+      </footer>
     </div>
   );
 }

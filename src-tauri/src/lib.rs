@@ -30,6 +30,9 @@ struct TerminalState {
     process: Child,
 }
 
+const MAX_EDITOR_FILE_BYTES: u64 = 1024 * 1024;
+const IGNORED_DIRECTORY_NAMES: &[&str] = &["node_modules", "dist", "target"];
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceInfo {
@@ -200,16 +203,20 @@ fn list_directory(
     {
         let entry = entry.map_err(|error| format!("Failed to read directory entry: {error}"))?;
         let entry_path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|error| format!("Failed to read metadata: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Failed to read entry type: {error}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
 
         if !include_hidden_files && name.starts_with('.') {
             continue;
         }
 
-        let is_directory = metadata.is_dir();
+        let is_directory = file_type.is_dir();
+        if is_directory && is_ignored_directory_name(&name) {
+            continue;
+        }
+
         let has_children = if is_directory {
             fs::read_dir(&entry_path)
                 .ok()
@@ -251,6 +258,16 @@ fn read_file(path: String, state: tauri::State<AppState>) -> Result<FileContent,
 
     if !file_path.is_file() {
         return Err(String::from("Requested path is not a file"));
+    }
+
+    let metadata = fs::metadata(&file_path)
+        .map_err(|error| format!("Failed to read file metadata: {error}"))?;
+    if metadata.len() > MAX_EDITOR_FILE_BYTES {
+        return Err(format!(
+            "File is too large to open in text editor ({} KB > {} KB)",
+            kb_rounded_up(metadata.len()),
+            kb_rounded_up(MAX_EDITOR_FILE_BYTES)
+        ));
     }
 
     let bytes = fs::read(&file_path).map_err(|error| format!("Failed to read file: {error}"))?;
@@ -714,21 +731,33 @@ fn search_directory(
 
         let entry = entry.map_err(|error| format!("Failed to read directory entry: {error}"))?;
         let path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|error| format!("Failed to read metadata: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Failed to read entry type: {error}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
 
         if !include_hidden && name.starts_with('.') {
             continue;
         }
 
-        if metadata.is_dir() {
+        if file_type.is_dir() {
+            if is_ignored_directory_name(&name) {
+                continue;
+            }
             search_directory(&path, query_lower, hits, max_hits, include_hidden)?;
             continue;
         }
 
-        if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if metadata.len() > 2 * 1024 * 1024 {
             continue;
         }
 
@@ -859,6 +888,16 @@ fn ensure_inside_workspace(candidate: &Path, workspace_root: &Path) -> Result<()
     }
 }
 
+fn is_ignored_directory_name(name: &str) -> bool {
+    IGNORED_DIRECTORY_NAMES
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn kb_rounded_up(bytes: u64) -> u64 {
+    (bytes + 1023) / 1024
+}
+
 fn is_probably_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(1024).any(|value| *value == 0)
 }
@@ -867,6 +906,7 @@ fn is_probably_binary(bytes: &[u8]) -> bool {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             set_workspace,
