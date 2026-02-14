@@ -346,8 +346,10 @@ fn terminal_create(
     let root = get_workspace_root_optional(&state)?;
     let cwd = match root {
         Some(path) => path,
-        None => std::env::current_dir()
-            .map_err(|error| format!("Failed to resolve current directory: {error}"))?,
+        None => normalize_windows_verbatim_path(
+            std::env::current_dir()
+                .map_err(|error| format!("Failed to resolve current directory: {error}"))?,
+        ),
     };
 
     let shell_value = shell
@@ -587,8 +589,8 @@ fn ai_run(request: AiRunRequest, state: tauri::State<AppState>) -> Result<AiRunR
     let cwd = match request.cwd {
         Some(path) if !path.trim().is_empty() => {
             let provided_path = PathBuf::from(path);
-            let canonical = fs::canonicalize(&provided_path)
-                .map_err(|error| format!("Failed to resolve AI working directory: {error}"))?;
+            let canonical =
+                canonicalize_path(&provided_path, "Failed to resolve AI working directory")?;
 
             if !canonical.is_dir() {
                 return Err(String::from("AI working directory is not a directory"));
@@ -601,8 +603,10 @@ fn ai_run(request: AiRunRequest, state: tauri::State<AppState>) -> Result<AiRunR
         }
         _ => match workspace {
             Some(path) => path,
-            None => std::env::current_dir()
-                .map_err(|error| format!("Failed to resolve current directory: {error}"))?,
+            None => normalize_windows_verbatim_path(
+                std::env::current_dir()
+                    .map_err(|error| format!("Failed to resolve current directory: {error}"))?,
+            ),
         },
     };
 
@@ -686,7 +690,7 @@ fn build_terminal_spawn_command(shell: &str, cwd: &Path) -> CommandBuilder {
     let mut command = CommandBuilder::new(shell);
 
     if shell_lower.contains("powershell") || shell_lower.contains("pwsh") {
-        command.args(["-NoLogo", "-NoProfile"]);
+        command.args(["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass"]);
     }
 
     command.cwd(cwd);
@@ -702,11 +706,14 @@ fn spawn_terminal_reader(
 ) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
+        let mut pending_utf8_bytes: Vec<u8> = Vec::new();
+
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(size) => {
-                    let chunk = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    let chunk =
+                        decode_terminal_output_chunk(&mut pending_utf8_bytes, &buffer[..size]);
                     if chunk.is_empty() {
                         continue;
                     }
@@ -730,6 +737,29 @@ fn spawn_terminal_reader(
                     );
                 }
                 Err(_) => break,
+            }
+        }
+
+        if !pending_utf8_bytes.is_empty() {
+            let chunk = String::from_utf8_lossy(&pending_utf8_bytes).to_string();
+            if !chunk.is_empty() {
+                if let Ok(terminal_guard) = terminals.lock() {
+                    if let Some(session) = terminal_guard.get(&session_id).cloned() {
+                        drop(terminal_guard);
+                        if let Ok(mut session_guard) = session.lock() {
+                            append_terminal_output(&mut session_guard.buffer, &chunk);
+                        }
+                    }
+                }
+
+                let _ = app.emit(
+                    "terminal://output",
+                    TerminalOutputEvent {
+                        session_id: session_id.clone(),
+                        chunk,
+                        is_error: false,
+                    },
+                );
             }
         }
 
@@ -757,6 +787,50 @@ fn append_terminal_output(output: &mut String, chunk: &str) {
         }
         output.drain(..drain_to);
     }
+}
+
+fn decode_terminal_output_chunk(pending_utf8_bytes: &mut Vec<u8>, chunk_bytes: &[u8]) -> String {
+    pending_utf8_bytes.extend_from_slice(chunk_bytes);
+
+    let mut decoded = String::new();
+    loop {
+        match std::str::from_utf8(pending_utf8_bytes) {
+            Ok(valid) => {
+                decoded.push_str(valid);
+                pending_utf8_bytes.clear();
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                let error_len = error.error_len();
+
+                if valid_up_to > 0 {
+                    if let Ok(valid_prefix) =
+                        std::str::from_utf8(&pending_utf8_bytes[..valid_up_to])
+                    {
+                        decoded.push_str(valid_prefix);
+                    }
+                    pending_utf8_bytes.drain(..valid_up_to);
+                }
+
+                match error_len {
+                    Some(length) => {
+                        let invalid_len = length.min(pending_utf8_bytes.len());
+                        if invalid_len == 0 {
+                            break;
+                        }
+
+                        decoded
+                            .push_str(&String::from_utf8_lossy(&pending_utf8_bytes[..invalid_len]));
+                        pending_utf8_bytes.drain(..invalid_len);
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    decoded
 }
 
 fn search_directory(
@@ -853,8 +927,7 @@ fn canonicalize_dir_path(path: &str) -> Result<PathBuf, String> {
         return Err(String::from("Workspace path cannot be empty"));
     }
 
-    let canonical = fs::canonicalize(path)
-        .map_err(|error| format!("Failed to resolve workspace path: {error}"))?;
+    let canonical = canonicalize_path(Path::new(path), "Failed to resolve workspace path")?;
 
     if !canonical.is_dir() {
         return Err(String::from("Workspace path must point to a directory"));
@@ -889,8 +962,7 @@ fn resolve_existing_workspace_path(path: &str, root: &Path) -> Result<PathBuf, S
         root.join(path)
     };
 
-    let canonical =
-        fs::canonicalize(candidate).map_err(|error| format!("Failed to resolve path: {error}"))?;
+    let canonical = canonicalize_path(&candidate, "Failed to resolve path")?;
     ensure_inside_workspace(&canonical, root)?;
 
     Ok(canonical)
@@ -904,8 +976,7 @@ fn resolve_write_workspace_path(path: &str, root: &Path) -> Result<PathBuf, Stri
     };
 
     if candidate.exists() {
-        let canonical = fs::canonicalize(candidate)
-            .map_err(|error| format!("Failed to resolve path: {error}"))?;
+        let canonical = canonicalize_path(&candidate, "Failed to resolve path")?;
         ensure_inside_workspace(&canonical, root)?;
         return Ok(canonical);
     }
@@ -913,8 +984,7 @@ fn resolve_write_workspace_path(path: &str, root: &Path) -> Result<PathBuf, Stri
     let parent = candidate
         .parent()
         .ok_or_else(|| String::from("Target file path has no parent directory"))?;
-    let canonical_parent = fs::canonicalize(parent)
-        .map_err(|error| format!("Failed to resolve parent directory: {error}"))?;
+    let canonical_parent = canonicalize_path(parent, "Failed to resolve parent directory")?;
     ensure_inside_workspace(&canonical_parent, root)?;
 
     let file_name = candidate
@@ -930,6 +1000,26 @@ fn ensure_inside_workspace(candidate: &Path, workspace_root: &Path) -> Result<()
     } else {
         Err(String::from("Path is outside workspace boundary"))
     }
+}
+
+fn canonicalize_path(path: &Path, error_context: &str) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path).map_err(|error| format!("{error_context}: {error}"))?;
+    Ok(normalize_windows_verbatim_path(canonical))
+}
+
+fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{stripped}"));
+        }
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+
+    path
 }
 
 fn is_ignored_directory_name(name: &str) -> bool {

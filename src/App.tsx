@@ -1,4 +1,6 @@
 import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
   useCallback,
   useEffect,
@@ -8,6 +10,7 @@ import {
 } from "react";
 import Editor from "@monaco-editor/react";
 import {
+  Copy,
   File,
   FileArchive,
   FileCode,
@@ -28,10 +31,9 @@ import {
   FolderOpen,
   FolderRoot,
   FolderSearch,
-  PanelBottomClose,
-  PanelBottomOpen,
-  PanelLeftClose,
-  PanelLeftOpen,
+  Minus,
+  Square,
+  X,
 } from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { listen } from "@tauri-apps/api/event";
@@ -45,7 +47,6 @@ import {
   listDirectory,
   readFile,
   setWorkspace,
-  terminalClear,
   terminalClose,
   terminalCreate,
   terminalList,
@@ -71,6 +72,7 @@ const FILE_ICON_THEME_STORAGE_KEY = "vexc.fileIconTheme";
 
 type ColorThemeId = "dark-plus" | "light-plus" | "one-dark-pro-orange";
 type FileIconThemeId = "vscode-colored" | "vscode-minimal";
+type HeaderMenuId = "file" | "view" | "theme";
 
 interface ColorThemeOption {
   id: ColorThemeId;
@@ -87,6 +89,22 @@ interface FileIconThemeOption {
 
 const DEFAULT_COLOR_THEME_ID: ColorThemeId = "dark-plus";
 const DEFAULT_FILE_ICON_THEME_ID: FileIconThemeId = "vscode-colored";
+const CODE_FONT_FAMILY = '"JetBrains Mono", "Cascadia Code", Consolas, monospace';
+const CODE_FONT_SIZE = 13;
+const CODE_LINE_HEIGHT = 18;
+const CODE_LINE_HEIGHT_RATIO = CODE_LINE_HEIGHT / CODE_FONT_SIZE;
+const MAX_TERMINAL_BUFFER_CHARS = 1024 * 1024;
+const EXPLORER_DEFAULT_WIDTH = 270;
+const EXPLORER_MIN_WIDTH = 180;
+const EXPLORER_RESIZER_WIDTH = 6;
+const EXPLORER_MAIN_PANEL_MIN_WIDTH = 260;
+
+function clampTerminalBuffer(value: string): string {
+  if (value.length <= MAX_TERMINAL_BUFFER_CHARS) {
+    return value;
+  }
+  return value.slice(value.length - MAX_TERMINAL_BUFFER_CHARS);
+}
 
 const colorThemeOptions: readonly ColorThemeOption[] = [
   {
@@ -280,6 +298,41 @@ interface PendingPosition {
   tabId: string;
   line: number;
   column: number;
+}
+
+type WorkbenchTabKind = "file" | "terminal";
+
+interface WorkbenchTabTarget {
+  kind: WorkbenchTabKind;
+  id: string;
+}
+
+function resolveWorkbenchFallbackAfterClose(
+  fileTabs: readonly EditorTab[],
+  terminalSessions: readonly TerminalSession[],
+  closedTarget: WorkbenchTabTarget,
+): WorkbenchTabTarget | null {
+  const orderedTargets: WorkbenchTabTarget[] = [
+    ...fileTabs.map((tab) => ({ kind: "file" as const, id: tab.id })),
+    ...terminalSessions.map((session) => ({ kind: "terminal" as const, id: session.id })),
+  ];
+
+  const removeIndex = orderedTargets.findIndex(
+    (target) => target.kind === closedTarget.kind && target.id === closedTarget.id,
+  );
+  if (removeIndex < 0) {
+    return orderedTargets[0] ?? null;
+  }
+
+  const remainingTargets = orderedTargets.filter(
+    (target) => !(target.kind === closedTarget.kind && target.id === closedTarget.id),
+  );
+  if (remainingTargets.length === 0) {
+    return null;
+  }
+
+  const fallbackIndex = Math.max(0, removeIndex - 1);
+  return remainingTargets[fallbackIndex] ?? remainingTargets[remainingTargets.length - 1];
 }
 
 type TreeIconTone =
@@ -759,10 +812,13 @@ function App() {
   const openFileRequestsRef = useRef<Record<string, Promise<string | null>>>({});
 
   const [terminals, setTerminals] = useState<TerminalSession[]>([]);
+  const terminalsRef = useRef<TerminalSession[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const activeTerminalIdRef = useRef<string | null>(null);
   const [terminalBuffers, setTerminalBuffers] = useState<Record<string, string>>({});
   const terminalBuffersRef = useRef<Record<string, string>>({});
+  const terminalPendingOutputBySessionRef = useRef<Record<string, string>>({});
+  const terminalOutputAnimationFrameRef = useRef<number | null>(null);
   const terminalWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const terminalResizeQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const terminalSizeKeyBySessionRef = useRef<Record<string, string>>({});
@@ -773,11 +829,14 @@ function App() {
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [isExplorerVisible, setIsExplorerVisible] = useState(true);
-  const [isTerminalVisible, setIsTerminalVisible] = useState(true);
+  const [explorerWidth, setExplorerWidth] = useState(EXPLORER_DEFAULT_WIDTH);
+  const [isExplorerResizing, setIsExplorerResizing] = useState(false);
+  const [activeWorkbenchTabKind, setActiveWorkbenchTabKind] = useState<WorkbenchTabKind>("file");
   const [activeColorThemeId, setActiveColorThemeId] = useState<ColorThemeId>(() => readStoredColorThemeId());
   const [activeFileIconThemeId, setActiveFileIconThemeId] = useState<FileIconThemeId>(() =>
     readStoredFileIconThemeId(),
   );
+  const [activeHeaderMenuId, setActiveHeaderMenuId] = useState<HeaderMenuId | null>(null);
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const activeColorTheme = useMemo(
@@ -791,10 +850,18 @@ function App() {
   const terminalRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const workbenchGridRef = useRef<HTMLDivElement | null>(null);
+  const explorerResizePointerIdRef = useRef<number | null>(null);
+  const explorerLastVisibleWidthRef = useRef(EXPLORER_DEFAULT_WIDTH);
 
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  useEffect(() => {
+    terminalsRef.current = terminals;
+  }, [terminals]);
 
   useEffect(() => {
     activeTerminalIdRef.current = activeTerminalId;
@@ -838,15 +905,60 @@ function App() {
     localStorage.setItem(FILE_ICON_THEME_STORAGE_KEY, activeFileIconThemeId);
   }, [activeFileIconThemeId]);
 
+  useEffect(() => {
+    if (!activeHeaderMenuId) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (headerMenuRef.current?.contains(target)) {
+        return;
+      }
+
+      setActiveHeaderMenuId(null);
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      setActiveHeaderMenuId(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeHeaderMenuId]);
+
+  useEffect(() => {
+    if (!isExplorerResizing) {
+      document.body.classList.remove("explorer-resizing");
+      return;
+    }
+
+    document.body.classList.add("explorer-resizing");
+    return () => {
+      document.body.classList.remove("explorer-resizing");
+    };
+  }, [isExplorerResizing]);
+
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [tabs, activeTabId],
   );
 
-  const activeTerminal = useMemo(
-    () => terminals.find((session) => session.id === activeTerminalId) ?? null,
-    [terminals, activeTerminalId],
-  );
+  const isFileTabActive = activeWorkbenchTabKind === "file";
+  const activeFileTab = isFileTabActive ? activeTab : null;
 
   const hasDirtyTabs = useMemo(
     () => tabs.some((tab) => tab.content !== tab.savedContent),
@@ -855,6 +967,104 @@ function App() {
 
   function tabIsDirty(tab: EditorTab): boolean {
     return tab.content !== tab.savedContent;
+  }
+
+  function hideExplorerPanel(): void {
+    setIsExplorerVisible(false);
+  }
+
+  function showExplorerPanel(): void {
+    const nextWidth = Math.max(explorerLastVisibleWidthRef.current, EXPLORER_MIN_WIDTH);
+    setExplorerWidth(nextWidth);
+    setIsExplorerVisible(true);
+  }
+
+  function toggleExplorerVisibility(): void {
+    if (isExplorerVisible) {
+      hideExplorerPanel();
+      return;
+    }
+
+    showExplorerPanel();
+  }
+
+  function stopExplorerResize(handle: HTMLDivElement | null): void {
+    const pointerId = explorerResizePointerIdRef.current;
+    if (handle && pointerId !== null && handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+
+    explorerResizePointerIdRef.current = null;
+    setIsExplorerResizing(false);
+  }
+
+  function handleExplorerResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0 || !isExplorerVisible) {
+      return;
+    }
+
+    explorerResizePointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsExplorerResizing(true);
+    event.preventDefault();
+  }
+
+  function handleExplorerResizeMove(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (!isExplorerResizing || explorerResizePointerIdRef.current !== event.pointerId) {
+      return;
+    }
+
+    const workbenchGrid = workbenchGridRef.current;
+    if (!workbenchGrid) {
+      return;
+    }
+
+    const bounds = workbenchGrid.getBoundingClientRect();
+    const maxWidth = Math.max(
+      EXPLORER_MIN_WIDTH,
+      bounds.width - EXPLORER_RESIZER_WIDTH - EXPLORER_MAIN_PANEL_MIN_WIDTH,
+    );
+    const requestedWidth = Math.max(0, Math.min(event.clientX - bounds.left, maxWidth));
+
+    if (requestedWidth < EXPLORER_MIN_WIDTH) {
+      hideExplorerPanel();
+      stopExplorerResize(event.currentTarget);
+      return;
+    }
+
+    setExplorerWidth(requestedWidth);
+    explorerLastVisibleWidthRef.current = requestedWidth;
+    if (!isExplorerVisible) {
+      setIsExplorerVisible(true);
+    }
+  }
+
+  function handleExplorerResizeEnd(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (explorerResizePointerIdRef.current !== event.pointerId) {
+      return;
+    }
+
+    stopExplorerResize(event.currentTarget);
+  }
+
+  function activateWorkbenchTab(target: WorkbenchTabTarget | null): void {
+    if (!target) {
+      setActiveWorkbenchTabKind("file");
+      setActiveTabId(null);
+      activeTerminalIdRef.current = null;
+      setActiveTerminalId(null);
+      return;
+    }
+
+    if (target.kind === "file") {
+      setActiveWorkbenchTabKind("file");
+      setActiveTabId(target.id);
+      return;
+    }
+
+    setActiveWorkbenchTabKind("terminal");
+    activeTerminalIdRef.current = target.id;
+    setActiveTerminalId(target.id);
   }
 
   function setDirectoryLoading(path: string, loading: boolean): void {
@@ -920,7 +1130,87 @@ function App() {
     fitAddonRef.current?.fit();
   }, []);
 
+  function cancelScheduledTerminalOutputFlush(): void {
+    if (terminalOutputAnimationFrameRef.current === null) {
+      return;
+    }
+
+    window.cancelAnimationFrame(terminalOutputAnimationFrameRef.current);
+    terminalOutputAnimationFrameRef.current = null;
+  }
+
+  function clearPendingTerminalOutput(sessionId?: string): void {
+    if (sessionId) {
+      delete terminalPendingOutputBySessionRef.current[sessionId];
+      return;
+    }
+
+    terminalPendingOutputBySessionRef.current = {};
+    cancelScheduledTerminalOutputFlush();
+  }
+
+  function flushPendingTerminalOutput(): void {
+    cancelScheduledTerminalOutputFlush();
+
+    const pendingOutputBySession = terminalPendingOutputBySessionRef.current;
+    const sessionIds = Object.keys(pendingOutputBySession);
+    if (sessionIds.length === 0) {
+      return;
+    }
+
+    terminalPendingOutputBySessionRef.current = {};
+
+    const activeSessionId = activeTerminalIdRef.current;
+    if (activeSessionId) {
+      const activeChunk = pendingOutputBySession[activeSessionId];
+      if (activeChunk && terminalRef.current) {
+        terminalRef.current.write(activeChunk);
+      }
+    }
+
+    setTerminalBuffers((previous) => {
+      const next = { ...previous };
+      let changed = false;
+
+      for (const sessionId of sessionIds) {
+        const chunk = pendingOutputBySession[sessionId];
+        if (!chunk) {
+          continue;
+        }
+
+        const existing = next[sessionId] ?? "";
+        const merged = clampTerminalBuffer(`${existing}${chunk}`);
+        if (merged === existing) {
+          continue;
+        }
+
+        next[sessionId] = merged;
+        changed = true;
+      }
+
+      if (!changed) {
+        return previous;
+      }
+
+      terminalBuffersRef.current = next;
+      return next;
+    });
+  }
+
+  function scheduleTerminalOutputFlush(): void {
+    if (terminalOutputAnimationFrameRef.current !== null) {
+      return;
+    }
+
+    terminalOutputAnimationFrameRef.current = window.requestAnimationFrame(() => {
+      terminalOutputAnimationFrameRef.current = null;
+      flushPendingTerminalOutput();
+    });
+  }
+
   function mergeTerminalSnapshot(snapshot: TerminalSessionSnapshot): void {
+    flushPendingTerminalOutput();
+
     terminalSizeKeyBySessionRef.current[snapshot.session.id] = `${snapshot.session.cols}x${snapshot.session.rows}`;
 
     setTerminals((previous) => {
@@ -938,7 +1228,7 @@ function App() {
     setTerminalBuffers((previous) => {
       const next = {
         ...previous,
-        [snapshot.session.id]: snapshot.buffer,
+        [snapshot.session.id]: clampTerminalBuffer(snapshot.buffer),
       };
       terminalBuffersRef.current = next;
       return next;
@@ -949,6 +1239,7 @@ function App() {
     try {
       const snapshot = await terminalCreate();
       mergeTerminalSnapshot(snapshot);
+      setActiveWorkbenchTabKind("terminal");
       activeTerminalIdRef.current = snapshot.session.id;
       setActiveTerminalId(snapshot.session.id);
       redrawTerminal(snapshot.session.id);
@@ -964,9 +1255,29 @@ function App() {
 
   async function refreshTerminalSessions(): Promise<void> {
     try {
+      flushPendingTerminalOutput();
+
       const sessions = await terminalList();
       if (sessions.length === 0) {
-        await createTerminalSession();
+        setTerminals([]);
+        setTerminalBuffers(() => {
+          terminalBuffersRef.current = {};
+          return {};
+        });
+        clearPendingTerminalOutput();
+        terminalSizeKeyBySessionRef.current = {};
+        activeTerminalIdRef.current = null;
+        setActiveTerminalId(null);
+        redrawTerminal(null);
+
+        if (activeWorkbenchTabKind === "terminal") {
+          const fallbackFileTab = tabsRef.current[0] ?? null;
+          setActiveWorkbenchTabKind("file");
+          if (fallbackFileTab) {
+            setActiveTabId(fallbackFileTab.id);
+          }
+        }
+
         return;
       }
 
@@ -979,7 +1290,7 @@ function App() {
       const buffers: Record<string, string> = {};
       for (const session of sessions) {
         const snapshot = await terminalSnapshot(session.id);
-        buffers[session.id] = snapshot.buffer;
+        buffers[session.id] = clampTerminalBuffer(snapshot.buffer);
       }
 
       setTerminalBuffers(() => {
@@ -1024,6 +1335,7 @@ function App() {
 
       setTabs([]);
       setActiveTabId(null);
+      setActiveWorkbenchTabKind("file");
       openFileRequestsRef.current = {};
       setOpeningFilesByPath({});
 
@@ -1039,6 +1351,7 @@ function App() {
       setTerminals([]);
       setTerminalBuffers({});
       terminalBuffersRef.current = {};
+      clearPendingTerminalOutput();
       terminalSizeKeyBySessionRef.current = {};
       terminalResizeQueueRef.current = Promise.resolve();
       setActiveTerminalId(null);
@@ -1055,6 +1368,7 @@ function App() {
   async function openFile(path: string, caret?: { line: number; column: number }): Promise<string | null> {
     const existing = tabsRef.current.find((tab) => tab.path === path);
     if (existing) {
+      setActiveWorkbenchTabKind("file");
       setActiveTabId(existing.id);
       if (caret) {
         setPendingPosition({ tabId: existing.id, line: caret.line, column: caret.column });
@@ -1087,6 +1401,7 @@ function App() {
         };
 
         setTabs((previous) => [...previous, tab]);
+        setActiveWorkbenchTabKind("file");
         setActiveTabId(tab.id);
         setStatusMessage(`Opened ${tab.title}`);
 
@@ -1158,16 +1473,24 @@ function App() {
     const existingTabs = tabsRef.current;
     const removeIndex = existingTabs.findIndex((tab) => tab.id === tabId);
     const nextTabs = existingTabs.filter((tab) => tab.id !== tabId);
+    const fallbackFileTab = nextTabs[Math.max(0, removeIndex - 1)] ?? null;
+
+    const shouldResolveWorkbenchFallback = activeWorkbenchTabKind === "file" && activeTabId === tabId;
+    const fallbackWorkbenchTab = shouldResolveWorkbenchFallback
+      ? resolveWorkbenchFallbackAfterClose(existingTabs, terminalsRef.current, {
+          kind: "file",
+          id: tabId,
+        })
+      : null;
 
     setTabs(nextTabs);
 
     if (activeTabId === tabId) {
-      if (nextTabs.length === 0) {
-        setActiveTabId(null);
-      } else {
-        const fallbackIndex = Math.max(0, removeIndex - 1);
-        setActiveTabId(nextTabs[fallbackIndex].id);
-      }
+      setActiveTabId(fallbackFileTab ? fallbackFileTab.id : null);
+    }
+
+    if (shouldResolveWorkbenchFallback) {
+      activateWorkbenchTab(fallbackWorkbenchTab);
     }
   }
 
@@ -1189,6 +1512,7 @@ function App() {
   }
 
   async function selectTerminal(sessionId: string): Promise<void> {
+    setActiveWorkbenchTabKind("terminal");
     activeTerminalIdRef.current = sessionId;
     setActiveTerminalId(sessionId);
     try {
@@ -1204,41 +1528,72 @@ function App() {
     }
   }
 
-  async function clearActiveTerminalOutput(): Promise<void> {
-    const sessionId = activeTerminalIdRef.current;
-    if (!sessionId) {
+  async function closeTerminalTab(sessionId: string): Promise<void> {
+    const existingSessions = terminalsRef.current;
+    const removeIndex = existingSessions.findIndex((session) => session.id === sessionId);
+    if (removeIndex < 0) {
       return;
     }
 
-    try {
-      const snapshot = await terminalClear(sessionId);
-      mergeTerminalSnapshot(snapshot);
-      redrawTerminal(sessionId);
-      setStatusMessage("Terminal output cleared.");
-    } catch (error) {
-      setStatusMessage(`Failed to clear terminal output: ${String(error)}`);
-    }
-  }
-
-  function interruptActiveTerminal(): void {
-    queueTerminalInput("\u0003");
-    setStatusMessage("Sent Ctrl+C to terminal.");
-  }
-
-  async function closeActiveTerminal(): Promise<void> {
-    const closeId = activeTerminalIdRef.current;
-    if (!closeId) {
-      return;
-    }
+    const nextSessions = existingSessions.filter((session) => session.id !== sessionId);
+    const fallbackSession = nextSessions[Math.max(0, removeIndex - 1)] ?? null;
+    const shouldResolveWorkbenchFallback = activeWorkbenchTabKind === "terminal" && activeTerminalIdRef.current === sessionId;
+    const fallbackWorkbenchTab = shouldResolveWorkbenchFallback
+      ? resolveWorkbenchFallbackAfterClose(tabsRef.current, existingSessions, {
+          kind: "terminal",
+          id: sessionId,
+        })
+      : null;
 
     try {
-      await terminalClose(closeId);
-      delete terminalSizeKeyBySessionRef.current[closeId];
-      await refreshTerminalSessions();
+      await terminalClose(sessionId);
+      delete terminalSizeKeyBySessionRef.current[sessionId];
+      clearPendingTerminalOutput(sessionId);
+
+      setTerminals(nextSessions);
+      setTerminalBuffers((previous) => {
+        if (!Object.prototype.hasOwnProperty.call(previous, sessionId)) {
+          return previous;
+        }
+
+        const next = { ...previous };
+        delete next[sessionId];
+        terminalBuffersRef.current = next;
+        return next;
+      });
+
+      if (activeTerminalIdRef.current === sessionId) {
+        activeTerminalIdRef.current = fallbackSession ? fallbackSession.id : null;
+        setActiveTerminalId(fallbackSession ? fallbackSession.id : null);
+      }
+
+      if (shouldResolveWorkbenchFallback) {
+        activateWorkbenchTab(fallbackWorkbenchTab);
+      } else if (activeTerminalIdRef.current) {
+        redrawTerminal(activeTerminalIdRef.current);
+      } else {
+        redrawTerminal(null);
+      }
+
       setStatusMessage("Terminal closed.");
     } catch (error) {
       setStatusMessage(`Failed to close terminal: ${String(error)}`);
     }
+  }
+
+  async function focusOrCreateTerminalTab(): Promise<void> {
+    const existingSessions = terminalsRef.current;
+    if (existingSessions.length === 0) {
+      await createTerminalSession();
+      return;
+    }
+
+    const targetSessionId =
+      activeTerminalIdRef.current && existingSessions.some((session) => session.id === activeTerminalIdRef.current)
+        ? activeTerminalIdRef.current
+        : existingSessions[0].id;
+
+    await selectTerminal(targetSessionId);
   }
 
   function queueTerminalInput(data: string): void {
@@ -1254,6 +1609,35 @@ function App() {
       });
   }
 
+  async function clearAllTerminalSessions(): Promise<void> {
+    try {
+      const existingSessions = await terminalList();
+      for (const session of existingSessions) {
+        await terminalClose(session.id);
+      }
+    } catch (error) {
+      setStatusMessage(`Failed to reset terminals: ${String(error)}`);
+    }
+
+    setTerminals([]);
+    setTerminalBuffers(() => {
+      terminalBuffersRef.current = {};
+      return {};
+    });
+    clearPendingTerminalOutput();
+    terminalSizeKeyBySessionRef.current = {};
+    terminalResizeQueueRef.current = Promise.resolve();
+    activeTerminalIdRef.current = null;
+    setActiveTerminalId(null);
+    redrawTerminal(null);
+
+    if (activeWorkbenchTabKind === "terminal") {
+      const fallbackFileTab = tabsRef.current[0] ?? null;
+      setActiveWorkbenchTabKind("file");
+      setActiveTabId(fallbackFileTab ? fallbackFileTab.id : null);
+    }
+  }
+
   async function restoreWorkspaceAndState(): Promise<void> {
     const savedWorkspace = localStorage.getItem(WORKSPACE_STORAGE_KEY);
     if (savedWorkspace) {
@@ -1266,11 +1650,11 @@ function App() {
       if (existingWorkspace) {
         await openWorkspaceByPath(existingWorkspace.rootPath, true);
       } else {
-        await refreshTerminalSessions();
+        await clearAllTerminalSessions();
       }
     } catch (error) {
       setStatusMessage(`Bootstrap failed: ${String(error)}`);
-      await refreshTerminalSessions();
+      await clearAllTerminalSessions();
     }
   }
 
@@ -1314,6 +1698,19 @@ function App() {
     } catch (error) {
       setStatusMessage(`Failed to open directory dialog: ${String(error)}`);
     }
+  }
+
+  function openHeaderMenu(menuId: HeaderMenuId): void {
+    setActiveHeaderMenuId(menuId);
+  }
+
+  function toggleHeaderMenu(menuId: HeaderMenuId): void {
+    setActiveHeaderMenuId((previous) => (previous === menuId ? null : menuId));
+  }
+
+  function runHeaderMenuAction(action: () => void | Promise<void>): void {
+    setActiveHeaderMenuId(null);
+    void action();
   }
 
   async function refreshWindowMaximizedState(): Promise<void> {
@@ -1415,9 +1812,9 @@ function App() {
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "block",
-      fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
+      fontFamily: CODE_FONT_FAMILY,
+      fontSize: CODE_FONT_SIZE,
+      lineHeight: CODE_LINE_HEIGHT_RATIO,
       allowTransparency: true,
       rightClickSelectsWord: true,
       theme: activeColorTheme.terminalTheme,
@@ -1517,23 +1914,20 @@ function App() {
 
     void listen<TerminalOutputEvent>("terminal://output", (event) => {
       const payload = event.payload;
-      setTerminalBuffers((previous) => {
-        const next = {
-          ...previous,
-          [payload.sessionId]: `${previous[payload.sessionId] ?? ""}${payload.chunk}`,
-        };
-        terminalBuffersRef.current = next;
-        return next;
-      });
-
-      if (payload.sessionId === activeTerminalIdRef.current && terminalRef.current) {
-        terminalRef.current.write(payload.chunk);
+      if (!payload.chunk) {
+        return;
       }
+
+      const pendingOutputBySession = terminalPendingOutputBySessionRef.current;
+      const existingChunk = pendingOutputBySession[payload.sessionId] ?? "";
+      pendingOutputBySession[payload.sessionId] = `${existingChunk}${payload.chunk}`;
+      scheduleTerminalOutputFlush();
     }).then((dispose) => {
       unlisten = dispose;
     });
 
     return () => {
+      clearPendingTerminalOutput();
       if (unlisten) {
         unlisten();
       }
@@ -1565,6 +1959,10 @@ function App() {
       );
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        if (!isFileTabActive) {
+          return;
+        }
+
         event.preventDefault();
         void saveTab();
         return;
@@ -1572,7 +1970,7 @@ function App() {
 
       if ((event.ctrlKey || event.metaKey) && event.key === "`") {
         event.preventDefault();
-        terminalRef.current?.focus();
+        void focusOrCreateTerminalTab();
         return;
       }
 
@@ -1595,7 +1993,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handler);
     };
-  }, [activeTabId]);
+  }, [isFileTabActive]);
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -1652,22 +2050,26 @@ function App() {
   }, [activeTerminalId, redrawTerminal]);
 
   useEffect(() => {
-    if (!isTerminalVisible) {
+    if (activeWorkbenchTabKind !== "terminal") {
       return;
     }
 
     const frameId = window.requestAnimationFrame(() => {
       redrawTerminal(activeTerminalIdRef.current);
       syncTerminalSizeRef.current(true);
+      terminalRef.current?.focus();
     });
 
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [isTerminalVisible, redrawTerminal]);
+  }, [activeWorkbenchTabKind, redrawTerminal]);
 
   const workbenchClassName = `workbench-grid${isExplorerVisible ? "" : " explorer-hidden"}`;
-  const mainPanelClassName = `main-panel${isTerminalVisible ? "" : " terminal-hidden"}`;
+  const workbenchStyle = useMemo(
+    () => ({ "--explorer-width": `${explorerWidth}px` } as CSSProperties),
+    [explorerWidth],
+  );
   const rootExpanded = workspace ? Boolean(expandedByPath[workspace.rootPath]) : false;
   const rootVisual = workspace
     ? resolveDirectoryVisual(workspace.rootName, rootExpanded, activeFileIconThemeId, true)
@@ -1675,82 +2077,156 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="window-bar">
+      <header className="window-bar" data-tauri-drag-region>
         <div className="window-drag" data-tauri-drag-region>
-          <span className="brand-label">VEXC</span>
-          <span className="workspace-current">{workspace ? workspace.rootName : "No workspace"}</span>
+          <img className="brand-icon" src="/icon.png" alt="VEXC" draggable={false} />
         </div>
 
-        <div className="workspace-controls">
-          <button type="button" className="primary" onClick={() => void promptWorkspacePath()}>
-            选择目录
-          </button>
-          <button type="button" className="secondary" onClick={() => void createTerminalSession()}>
-            新建终端
-          </button>
-          <button
-            type="button"
-            className="secondary visibility-toggle"
-            aria-label={isExplorerVisible ? "隐藏文件树" : "显示文件树"}
-            aria-pressed={isExplorerVisible}
-            title={isExplorerVisible ? "隐藏文件树" : "显示文件树"}
-            onClick={() => setIsExplorerVisible((previous) => !previous)}
+        <div
+          ref={headerMenuRef}
+          className="header-menus"
+          data-tauri-drag-region
+          role="menubar"
+          aria-label="工作台菜单"
+          onMouseLeave={() => setActiveHeaderMenuId(null)}
+        >
+          <div
+            className={`header-menu ${activeHeaderMenuId === "file" ? "active" : ""}`}
+            onMouseEnter={() => openHeaderMenu("file")}
           >
-            {isExplorerVisible ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
-            <span>文件树</span>
-          </button>
-          <button
-            type="button"
-            className="secondary visibility-toggle"
-            aria-label={isTerminalVisible ? "隐藏终端面板" : "显示终端面板"}
-            aria-pressed={isTerminalVisible}
-            title={isTerminalVisible ? "隐藏终端面板" : "显示终端面板"}
-            onClick={() => setIsTerminalVisible((previous) => !previous)}
-          >
-            {isTerminalVisible ? <PanelBottomClose size={14} /> : <PanelBottomOpen size={14} />}
-            <span>终端</span>
-          </button>
-          <label className="theme-select-wrap" title="选择颜色主题">
-            <span className="theme-select-label">颜色</span>
-            <select
-              className="theme-select"
-              aria-label="颜色主题"
-              value={activeColorThemeId}
-              onChange={(event) => {
-                const nextThemeId = event.target.value;
-                if (isColorThemeId(nextThemeId)) {
-                  setActiveColorThemeId(nextThemeId);
-                  return;
-                }
+            <button
+              type="button"
+              className="menu-tab"
+              aria-haspopup="menu"
+              aria-expanded={activeHeaderMenuId === "file"}
+              onClick={() => toggleHeaderMenu("file")}
+            >
+              文件
+            </button>
+            {activeHeaderMenuId === "file" ? (
+              <div className="menu-panel" role="menu" aria-label="文件菜单">
+                <button type="button" className="menu-item" role="menuitem" onClick={() => runHeaderMenuAction(promptWorkspacePath)}>
+                  <span className="menu-item-main">
+                    <span className="menu-item-indicator" aria-hidden="true" />
+                    <span className="menu-item-label">打开文件夹...</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  disabled={!activeFileTab}
+                  onClick={() => runHeaderMenuAction(() => saveTab())}
+                >
+                  <span className="menu-item-main">
+                    <span className="menu-item-indicator" aria-hidden="true" />
+                    <span className="menu-item-label">保存</span>
+                  </span>
+                  <span className="menu-item-hint">Ctrl+S</span>
+                </button>
+                <div className="menu-divider" />
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => runHeaderMenuAction(createTerminalSession)}
+                >
+                  <span className="menu-item-main">
+                    <span className="menu-item-indicator" aria-hidden="true" />
+                    <span className="menu-item-label">新建终端</span>
+                  </span>
+                  <span className="menu-item-hint">Ctrl+`</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
 
-                setStatusMessage(`Ignored unsupported color theme: ${nextThemeId}`);
-              }}
+          <div
+            className={`header-menu ${activeHeaderMenuId === "view" ? "active" : ""}`}
+            onMouseEnter={() => openHeaderMenu("view")}
+          >
+            <button
+              type="button"
+              className="menu-tab"
+              aria-haspopup="menu"
+              aria-expanded={activeHeaderMenuId === "view"}
+              onClick={() => toggleHeaderMenu("view")}
             >
-              {colorThemeOptions.map((theme) => (
-                <option key={theme.id} value={theme.id}>
-                  {theme.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="theme-select-wrap" title="选择文件图标主题">
-            <span className="theme-select-label">图标</span>
-            <select
-              className="theme-select"
-              aria-label="文件图标主题"
-              value={activeFileIconThemeId}
-              onChange={(event) => setActiveFileIconThemeId(event.target.value as FileIconThemeId)}
+              视图
+            </button>
+            {activeHeaderMenuId === "view" ? (
+              <div className="menu-panel" role="menu" aria-label="视图菜单">
+                <button
+                  type="button"
+                  className={`menu-item ${isExplorerVisible ? "selected" : ""}`}
+                  role="menuitem"
+                  onClick={() => runHeaderMenuAction(toggleExplorerVisibility)}
+                >
+                  <span className="menu-item-main">
+                    <span className={`menu-item-indicator ${isExplorerVisible ? "selected" : ""}`} aria-hidden="true" />
+                    <span className="menu-item-label">显示文件树</span>
+                  </span>
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          <div
+            className={`header-menu ${activeHeaderMenuId === "theme" ? "active" : ""}`}
+            onMouseEnter={() => openHeaderMenu("theme")}
+          >
+            <button
+              type="button"
+              className="menu-tab"
+              aria-haspopup="menu"
+              aria-expanded={activeHeaderMenuId === "theme"}
+              onClick={() => toggleHeaderMenu("theme")}
             >
-              {fileIconThemeOptions.map((theme) => (
-                <option key={theme.id} value={theme.id}>
-                  {theme.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" className="primary" onClick={() => void saveTab()} disabled={!activeTab}>
-            保存
-          </button>
+              主题
+            </button>
+            {activeHeaderMenuId === "theme" ? (
+              <div className="menu-panel menu-panel-theme" role="menu" aria-label="主题菜单">
+                <p className="menu-section-title">颜色主题</p>
+                {colorThemeOptions.map((theme) => {
+                  const isSelected = activeColorThemeId === theme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      className={`menu-item ${isSelected ? "selected" : ""}`}
+                      role="menuitem"
+                      onClick={() => runHeaderMenuAction(() => setActiveColorThemeId(theme.id))}
+                    >
+                      <span className="menu-item-main">
+                        <span className={`menu-item-indicator ${isSelected ? "selected" : ""}`} aria-hidden="true" />
+                        <span className="menu-item-label">{theme.label}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+
+                <div className="menu-divider" />
+                <p className="menu-section-title">文件图标</p>
+                {fileIconThemeOptions.map((theme) => {
+                  const isSelected = activeFileIconThemeId === theme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      className={`menu-item ${isSelected ? "selected" : ""}`}
+                      role="menuitem"
+                      onClick={() => runHeaderMenuAction(() => setActiveFileIconThemeId(theme.id))}
+                    >
+                      <span className="menu-item-main">
+                        <span className={`menu-item-indicator ${isSelected ? "selected" : ""}`} aria-hidden="true" />
+                        <span className="menu-item-label">{theme.label}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="window-controls">
@@ -1760,7 +2236,7 @@ function App() {
             aria-label="Minimize window"
             onClick={() => void handleWindowMinimize()}
           >
-            <span className="window-glyph min" />
+            <Minus size={14} strokeWidth={1.9} className="window-control-icon" />
           </button>
           <button
             type="button"
@@ -1768,7 +2244,11 @@ function App() {
             aria-label={isWindowMaximized ? "Restore window" : "Maximize window"}
             onClick={() => void handleWindowToggleMaximize()}
           >
-            <span className={`window-glyph ${isWindowMaximized ? "restore" : "max"}`} />
+            {isWindowMaximized ? (
+              <Copy size={14} strokeWidth={1.9} className="window-control-icon" />
+            ) : (
+              <Square size={13} strokeWidth={1.9} className="window-control-icon" />
+            )}
           </button>
           <button
             type="button"
@@ -1776,14 +2256,13 @@ function App() {
             aria-label="Close window"
             onClick={() => void handleWindowClose()}
           >
-            <span className="window-glyph close" />
+            <X size={14} strokeWidth={1.9} className="window-control-icon" />
           </button>
         </div>
       </header>
 
-      <div className={workbenchClassName}>
+      <div ref={workbenchGridRef} className={workbenchClassName} style={workbenchStyle}>
         <aside className="explorer-panel">
-          <div className="panel-title">Explorer</div>
           {workspace ? (
             <div className="explorer-root">
               <button
@@ -1814,24 +2293,81 @@ function App() {
           )}
         </aside>
 
-        <section className={mainPanelClassName}>
+        <div
+          className="explorer-resizer"
+          role="separator"
+          aria-label="调整文件树宽度"
+          aria-orientation="vertical"
+          onPointerDown={handleExplorerResizeStart}
+          onPointerMove={handleExplorerResizeMove}
+          onPointerUp={handleExplorerResizeEnd}
+          onPointerCancel={handleExplorerResizeEnd}
+        />
+
+        <section className="main-panel">
           <section className="editor-panel">
             <div className="tab-strip">
-              {tabs.map((tab) => (
-                <div key={tab.id} className={`tab-item ${tab.id === activeTabId ? "active" : ""}`}>
-                  <button type="button" className="tab-button" onClick={() => setActiveTabId(tab.id)}>
-                    {tab.title}
-                    {tabIsDirty(tab) ? " *" : ""}
-                  </button>
-                  <button type="button" className="tab-close" onClick={() => closeTab(tab.id)}>
-                    x
-                  </button>
-                </div>
-              ))}
+              <div className="tab-strip-scroll">
+                {tabs.map((tab) => (
+                  <div
+                    key={tab.id}
+                    className={`tab-item ${isFileTabActive && tab.id === activeTabId ? "active" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      className="tab-button"
+                      onClick={() => {
+                        setActiveWorkbenchTabKind("file");
+                        setActiveTabId(tab.id);
+                      }}
+                    >
+                      {tab.title}
+                      {tabIsDirty(tab) ? " *" : ""}
+                    </button>
+                    <button type="button" className="tab-close" onClick={() => closeTab(tab.id)}>
+                      <X size={14} className="tab-close-icon" />
+                    </button>
+                  </div>
+                ))}
+
+                {terminals.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`tab-item terminal ${
+                      activeWorkbenchTabKind === "terminal" && session.id === activeTerminalId ? "active" : ""
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className="tab-button terminal"
+                      onClick={() => void selectTerminal(session.id)}
+                      title={session.cwd}
+                    >
+                      <span className={`tab-dot ${session.status === "running" ? "running" : "stopped"}`} />
+                      <span className="tab-title-text">{session.title}</span>
+                    </button>
+                    <button type="button" className="tab-close" onClick={() => void closeTerminalTab(session.id)}>
+                      <X size={14} className="tab-close-icon" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="tab-strip-actions">
+                <button
+                  type="button"
+                  className="tab-add"
+                  title="新建终端"
+                  aria-label="新建终端"
+                  onClick={() => void createTerminalSession()}
+                >
+                  +
+                </button>
+              </div>
             </div>
 
             <div className="editor-surface">
-              {activeTab ? (
+              {isFileTabActive && activeTab ? (
                 <Editor
                   path={activeTab.path}
                   language={activeTab.language}
@@ -1844,8 +2380,9 @@ function App() {
                   options={{
                     automaticLayout: true,
                     minimap: { enabled: false },
-                    fontSize: 13,
-                    lineHeight: 20,
+                    fontFamily: CODE_FONT_FAMILY,
+                    fontSize: CODE_FONT_SIZE,
+                    lineHeight: CODE_LINE_HEIGHT,
                     tabSize: 2,
                     insertSpaces: true,
                     wordWrap: "on",
@@ -1854,65 +2391,17 @@ function App() {
                     smoothScrolling: true,
                   }}
                 />
-              ) : (
+              ) : isFileTabActive ? (
                 <div className="empty-state">
                   <h3>Ready for coding</h3>
-                  <p>Open a file from the explorer to start editing.</p>
+                  <p>Open a file from the explorer to start editing. Use + to add terminal tabs.</p>
                 </div>
-              )}
-            </div>
-          </section>
+              ) : null}
 
-          <section className="terminal-panel">
-            <div className="terminal-toolbar">
-              <div className="terminal-tabs">
-                {terminals.map((session) => (
-                  <button
-                    key={session.id}
-                    type="button"
-                    className={`terminal-tab ${session.id === activeTerminalId ? "active" : ""}`}
-                    onClick={() => void selectTerminal(session.id)}
-                    title={session.cwd}
-                  >
-                    <span
-                      className={`terminal-tab-dot ${session.status === "running" ? "running" : "stopped"}`}
-                    />
-                    <span className="terminal-tab-title">{session.title}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="terminal-actions">
-                <button type="button" onClick={() => void createTerminalSession()}>
-                  +
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!activeTerminal}
-                  onClick={() => interruptActiveTerminal()}
-                >
-                  Ctrl+C
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!activeTerminal}
-                  onClick={() => void clearActiveTerminalOutput()}
-                >
-                  清屏
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!activeTerminal}
-                  onClick={() => void closeActiveTerminal()}
-                >
-                  关闭
-                </button>
+              <div className={`terminal-surface ${activeWorkbenchTabKind === "terminal" ? "active" : ""}`}>
+                <div ref={terminalHostRef} className="terminal-host" />
               </div>
             </div>
-
-            <div ref={terminalHostRef} className="terminal-host" />
           </section>
         </section>
       </div>
