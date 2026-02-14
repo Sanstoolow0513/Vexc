@@ -11,13 +11,23 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 ## Development Commands
 
 ### Core Development
-- `pnpm tauri dev` - Start development server with hot reload
-- `pnpm build` - Build frontend for production
-- `pnpm tauri build` - Build complete desktop application
+- `pnpm tauri dev` - Start development server with hot reload (Vite on port 1420)
+- `pnpm build` - Build frontend for production (outputs to `dist/`)
+- `pnpm tauri build` - Build complete desktop application (outputs to `src-tauri/target/release/bundle/`)
+- `pnpm preview` - Preview production frontend build
 
 ### Package Management
 - Uses `pnpm` as package manager
 - `pnpm install` - Install dependencies
+
+### Testing
+- No JavaScript test framework currently configured (planned for M3 milestone)
+- Rust tests: Run `cargo test` in `src-tauri/` directory when backend tests are added
+
+### Development URLs
+- Frontend dev server: `http://localhost:1420`
+- Tauri automatically updates `tauri.conf.json` devUrl when using `pnpm tauri dev`
+- Vite config: `strictPort: true` (fails if port 1420 unavailable), `clearScreen: false` (preserves Rust error output)
 
 ### Platform-Specific
 - Desktop: Works on Windows, macOS, Linux
@@ -33,7 +43,12 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 - `src/api.ts` - Tauri command wrappers (invoke backend commands)
 - `src/types.ts` - Shared TypeScript types (mirrored in Rust)
 - `src/utils.ts` - Helper functions (language detection, path handling, arg parsing)
-- `src/hints.ts` - Keyword-based code suggestion system
+- `src/hints.ts` - Keyword-based code suggestion system (defined but not yet integrated in UI)
+
+**Window Management**:
+- Custom window frame (`decorations: false` in tauri.conf.json)
+- Custom title bar with drag region (`data-tauri-drag-region`)
+- Window controls (minimize, maximize/close) implemented manually
 
 **State Management Pattern**:
 - Centralized in `App.tsx` using React hooks (useState, useEffect, useMemo)
@@ -52,7 +67,15 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 
 **Editor**: Monaco Editor (`@monaco-editor/react`)
 - Mounted in `App.tsx`, ref stored for programmatic control
+- Custom One Dark Pro theme defined in `handleEditorMount` (orange variant)
 - Handles keyboard shortcuts (Ctrl+S for save, Tab for hints, Escape to close hints)
+- Editor options: word wrap on, minimap disabled, 13px font, 2-space tabs
+
+**Terminal Integration** (xterm.js):
+- Uses `@xterm/xterm` with `@xterm/addon-fit` for auto-sizing
+- Single visible terminal instance switched between sessions via `redrawTerminal()`
+- Real-time output via Tauri event system (`terminal://output`)
+- PowerShell spawns with `-NoLogo -NoProfile` arguments on Windows
 
 ### Backend Structure (Rust + Tauri)
 
@@ -60,7 +83,7 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 
 **State**: `AppState` struct with:
 - `workspace_root: Mutex<Option<PathBuf>>` - Current workspace directory
-- `terminals: Mutex<HashMap<String, TerminalState>>` - Terminal sessions
+- `terminals: Mutex<HashMap<String, Arc<Mutex<TerminalState>>>>` - Terminal sessions
 - `terminal_counter: AtomicU64` - Session ID generator
 
 **Security Model**:
@@ -73,7 +96,7 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 - `set_workspace`, `get_workspace` - Workspace management
 - `list_directory`, `read_file`, `write_file` - File operations
 - `search_workspace` - Recursive text search (max 200 hits default)
-- `terminal_create`, `terminal_list`, `terminal_write`, `terminal_close` - Terminal session management
+- `terminal_create`, `terminal_list`, `terminal_snapshot`, `terminal_write`, `terminal_close` - Terminal session management
 - `ai_provider_suggestions`, `ai_run` - AI CLI integration
 
 **Data Flow**:
@@ -82,6 +105,12 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 3. Tauri bridges to Rust command handler in `lib.rs`
 4. Rust returns `Result<Type, String>` (error message as String)
 5. Frontend receives Promise<Type>
+
+**Event System** (Rust → Frontend):
+- Backend emits `terminal://output` events with `TerminalOutputEvent` payload
+- Frontend listens via `listen<TerminalOutputEvent>("terminal://output", handler)`
+- Enables real-time terminal output streaming without polling
+- Events automatically sync to visible terminal session via `activeTerminalIdRef`
 
 ### Type Synchronization
 
@@ -100,11 +129,19 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 - **Bottom panel**: Terminal / AI assistant (toggleable)
 - **Status bar**: Feedback messages
 
+**Theme System**:
+- One Dark Pro color scheme implemented as CSS custom properties (variables)
+- Core variables: `--bg-canvas-top`, `--surface-0/1/2`, `--accent`, `--text`, etc.
+- Theme variables defined in `:root` selector in `App.css`
+- Consistent theming across UI components via CSS variable references
+
 **Key UI Patterns**:
 - Lazy-loaded directory tree (fetches children on expand)
 - Tab-based editing with dirty state tracking (`content !== savedContent`)
 - Virtual terminal sessions (line-based, not PTY)
-- Keyword hint panel that appears on content change
+- **Monaco Editor Theming**: Custom One Dark Pro theme defined in `handleEditorMount`:
+  - Token colors: keywords (#c678dd), strings (#98c379), functions (#61afef), etc.
+  - Custom background (#0a0c10) and selection colors
 - **Terminal Write Queue**: Uses Promise chain to serialize terminal input:
   ```typescript
   terminalWriteQueueRef.current = terminalWriteQueueRef.current
@@ -115,6 +152,15 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
   (`editor.addCommand`) and globally (`window.addEventListener`) for reliability
 - **Browser Close Protection**: `beforeunload` event prevents accidental window
   closure when dirty tabs exist (`hasDirtyTabs` check)
+
+### AI CLI Integration
+
+**Placeholder System**:
+- AI commands support template variables: `{prompt}`, `{workspace}`
+- Example template: `["{prompt}"]` or `["--workspace", "{workspace}", "{prompt}"]`
+- Runtime replacement in `ai_run` Rust command
+- Built-in providers: `codex`, `claude`, `gemini` (configurable via `aiProviderSuggestions`)
+- Working directory defaults to workspace root, custom CWD validated against workspace boundary
 
 ### Phase 1 Scope (from PROJECT_PLAN.md)
 
@@ -133,38 +179,98 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 - Cloud sync/collaboration
 - Full VSCode settings ecosystem
 
+### Pull Request Guidelines
+
+When contributing changes:
+- Include a clear summary of changes
+- Reference linked issue/ticket if applicable
+- Provide test evidence (manual or automated)
+- Include screenshots or screen recordings for UI changes
+- Keep commits scoped to one concern (frontend, Rust backend, or config)
+
 ### Important Constraints
 
 1. **Workspace Boundary**: All file I/O must validate paths are within workspace root
-2. **Binary File Protection**: Detect and prevent opening binary files (>2MB limit for search)
+2. **Binary File Protection**: Detect and prevent opening binary files via null byte scanning (>2MB limit for search, 1MB limit for editor)
 3. **Terminal Session Isolation**: Each terminal maintains its own CWD and line buffer,
-   with scrollback limited to 20,000 lines to prevent memory issues
+   with scrollback limited to 1,800 lines to prevent memory issues
 4. **State Synchronization**: Use refs (`tabsRef`, `activeTabIdRef`, etc.) to avoid stale closures in async operations
 5. **Error Messages**: All Rust errors return as `String`, displayed in status bar
+6. **Ignored Directories**: `node_modules`, `dist`, `target` are automatically excluded from file tree and search
+7. **Security Policy**: CSP is currently set to `null` in `tauri.conf.json` - should be configured for production builds
+
+### Key Constants
+
+**Backend (`src-tauri/src/lib.rs`)**:
+- `MAX_EDITOR_FILE_BYTES = 1,048,576` (1MB) - Maximum file size for editor
+- Search file limit: 2MB per file
+- Terminal scrollback limit: 1,800 lines
+- Search results default limit: 200 hits
+
+**Frontend (`src/App.tsx`)**:
+- `WORKSPACE_STORAGE_KEY = "vexc.workspacePath"` - localStorage key for workspace persistence
 
 ### Development Workflow
 
-1. Backend changes: Edit `src-tauri/src/lib.rs`, restart `pnpm tauri dev`
-2. Frontend changes: Hot reload via Vite
-3. Type changes: Update both `src/types.ts` and corresponding Rust structs
-4. Testing: Manual testing in dev mode (no automated tests yet - M3 milestone)
+1. **Frontend changes** (`src/`): Hot reload via Vite (most changes apply immediately)
+2. **Backend changes** (`src-tauri/src/`): Restart `pnpm tauri dev` (Rust requires recompilation)
+3. **Type changes**: Update both `src/types.ts` and corresponding Rust structs with `#[serde(rename_all = "camelCase")]`
+4. **Testing**: Manual testing in dev mode (no automated tests yet - M3 milestone)
+5. **Vite ignored paths**: `src-tauri/` is excluded from Vite's watch to prevent interference with Rust builds
+
+### TypeScript Configuration
+
+**`tsconfig.json`**:
+- Strict mode enabled (`strict: true`)
+- Unused locals/parameters checks enabled
+- `target: ES2020`, `module: ESNext`
+- `jsx: react-jsx` (new JSX transform)
+- `moduleResolution: bundler` for Vite compatibility
+
+### Code Style & Naming Conventions
+
+**Frontend (TypeScript/TSX)**:
+- 2-space indentation, double quotes for strings
+- `PascalCase` for React components
+- `camelCase` for variables, functions, and hooks
+- Tauri commands should be explicit and small
+
+**Backend (Rust)**:
+- 4-space indentation (rustfmt default)
+- `snake_case` for function names and variables
+- Use `#[serde(rename_all = "camelCase")]` on structs exposed to frontend
+
+### Git Commit Convention
+
+Use Conventional Commit format:
+- `feat(ui): ...` - New features
+- `fix(tauri): ...` - Bug fixes
+- `chore: ...` - Maintenance tasks
+- Keep commits scoped to one concern (frontend, Rust backend, or config)
 
 ### Windows-Specific Notes
 
-- Default terminal: `powershell.exe`
+- Default terminal: `powershell.exe` with `-NoLogo -NoProfile` arguments
 - Path handling: Normalized to forward slashes in frontend, uses OS-native paths in backend
 - Build target: Works on Windows 11 IoT Enterprise LTSC (dev environment)
+- Terminal output normalization: `\r\n` and `\r` converted to `\n` for consistent line handling
 
 ### Key Functions Reference
 
 **Frontend - `src/api.ts`**:
 - `setWorkspace(path)` → Initialize workspace
+- `getWorkspace()` → Retrieve current workspace info
 - `listDirectory(path?, includeHidden?)` → Get file nodes
 - `readFile(path)` → Load file content
 - `writeFile(path, content)` → Save file
 - `searchWorkspace(query, maxResults?, includeHidden?)` → Text search
 - `terminalCreate(shell?)` → Start new terminal session
+- `terminalList()` → List all terminal sessions
+- `terminalSnapshot(sessionId)` → Get terminal buffer snapshot
 - `terminalWrite(sessionId, input)` → Execute command in terminal
+- `terminalClose(sessionId)` → Close terminal session
+- `aiProviderSuggestions()` → Get available AI CLI providers
+- `aiRun(request)` → Execute AI command with workspace context
 
 **Frontend - `src/utils.ts`**:
 - `detectLanguage(path)` → Map file extension to Monaco language
@@ -173,8 +279,11 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 
 **Backend - Security Helpers**:
 - `ensure_inside_workspace(candidate, workspace_root)` → Path boundary validation
-- `is_probably_binary(bytes)` → Detect binary files via null bytes
+- `is_probably_binary(bytes)` → Detect binary files via null bytes (first 1KB scanned)
 - `canonicalize_dir_path(path)` → Resolve and validate directory path
+- `build_terminal_spawn_command(shell, cwd)` → Build platform-specific shell command
+  - PowerShell/pwsh: Adds `-NoLogo -NoProfile` flags
+  - Other shells: Uses default command behavior
 
 ### Milestones Tracking
 

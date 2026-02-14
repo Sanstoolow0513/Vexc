@@ -1,12 +1,38 @@
 import {
   type ReactElement,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import Editor from "@monaco-editor/react";
-import { File, Folder, FolderOpen } from "lucide-react";
+import {
+  File,
+  FileArchive,
+  FileCode,
+  FileCog,
+  FileImage,
+  FileLock,
+  FilePenLine,
+  FileSpreadsheet,
+  FileTerminal,
+  FileText,
+  FileType,
+  Folder,
+  FolderArchive,
+  FolderCog,
+  FolderCode,
+  FolderGit2,
+  FolderLock,
+  FolderOpen,
+  FolderRoot,
+  FolderSearch,
+  PanelBottomClose,
+  PanelBottomOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,9 +45,11 @@ import {
   listDirectory,
   readFile,
   setWorkspace,
+  terminalClear,
   terminalClose,
   terminalCreate,
   terminalList,
+  terminalResize,
   terminalSnapshot,
   terminalWrite,
   writeFile,
@@ -45,6 +73,261 @@ interface PendingPosition {
   column: number;
 }
 
+type TreeIconTone =
+  | "default"
+  | "code"
+  | "data"
+  | "doc"
+  | "media"
+  | "archive"
+  | "script"
+  | "secure";
+
+interface TreeNodeVisual {
+  icon: ReactElement;
+  tone: TreeIconTone;
+}
+
+const codeFileExtensions = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".rs",
+  ".go",
+  ".java",
+  ".kt",
+  ".swift",
+  ".cpp",
+  ".c",
+  ".h",
+  ".hpp",
+  ".cs",
+  ".php",
+  ".rb",
+]);
+
+const scriptFileExtensions = new Set([".sh", ".bash", ".zsh", ".ps1", ".cmd", ".bat"]);
+
+const configFileExtensions = new Set([
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".ini",
+  ".conf",
+  ".xml",
+  ".lock",
+]);
+
+const docFileExtensions = new Set([".md", ".mdx", ".txt", ".log", ".rst"]);
+const sheetFileExtensions = new Set([".csv", ".tsv", ".xlsx", ".xls"]);
+const mediaFileExtensions = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".svg",
+  ".webp",
+  ".ico",
+  ".bmp",
+]);
+const archiveFileExtensions = new Set([
+  ".zip",
+  ".rar",
+  ".7z",
+  ".tar",
+  ".gz",
+  ".tgz",
+  ".xz",
+]);
+
+const codeDirectoryNames = new Set([
+  "src",
+  "app",
+  "apps",
+  "lib",
+  "components",
+  "pages",
+  "routes",
+  "hooks",
+]);
+const configDirectoryNames = new Set(["config", "configs", ".config", ".vscode", ".idea"]);
+const buildDirectoryNames = new Set(["dist", "build", "target", "out", "node_modules", ".next"]);
+const secureDirectoryNames = new Set([".ssh", "secrets", "secret", "private", "certs"]);
+const inspectionDirectoryNames = new Set(["test", "tests", "spec", "specs", "__tests__"]);
+
+function extensionFromName(name: string): string {
+  const normalizedName = name.toLowerCase();
+  const extensionIndex = normalizedName.lastIndexOf(".");
+  if (extensionIndex < 0) {
+    return "";
+  }
+  return normalizedName.slice(extensionIndex);
+}
+
+function resolveDirectoryVisual(name: string, expanded: boolean, isRoot = false): TreeNodeVisual {
+  if (isRoot) {
+    return {
+      icon: <FolderRoot size={14} />,
+      tone: "code",
+    };
+  }
+
+  const normalizedName = name.toLowerCase();
+
+  if (normalizedName === ".git") {
+    return {
+      icon: <FolderGit2 size={14} />,
+      tone: "data",
+    };
+  }
+
+  if (codeDirectoryNames.has(normalizedName)) {
+    return {
+      icon: <FolderCode size={14} />,
+      tone: "code",
+    };
+  }
+
+  if (configDirectoryNames.has(normalizedName)) {
+    return {
+      icon: <FolderCog size={14} />,
+      tone: "data",
+    };
+  }
+
+  if (buildDirectoryNames.has(normalizedName)) {
+    return {
+      icon: <FolderArchive size={14} />,
+      tone: "archive",
+    };
+  }
+
+  if (secureDirectoryNames.has(normalizedName)) {
+    return {
+      icon: <FolderLock size={14} />,
+      tone: "secure",
+    };
+  }
+
+  if (inspectionDirectoryNames.has(normalizedName)) {
+    return {
+      icon: <FolderSearch size={14} />,
+      tone: "doc",
+    };
+  }
+
+  return {
+    icon: expanded ? <FolderOpen size={14} /> : <Folder size={14} />,
+    tone: "default",
+  };
+}
+
+function resolveFileVisual(name: string): TreeNodeVisual {
+  const normalizedName = name.toLowerCase();
+  const extension = extensionFromName(name);
+
+  if (normalizedName.startsWith(".env")) {
+    return {
+      icon: <FileLock size={14} />,
+      tone: "secure",
+    };
+  }
+
+  if (normalizedName === "dockerfile") {
+    return {
+      icon: <FileTerminal size={14} />,
+      tone: "script",
+    };
+  }
+
+  if (scriptFileExtensions.has(extension)) {
+    return {
+      icon: <FileTerminal size={14} />,
+      tone: "script",
+    };
+  }
+
+  if (codeFileExtensions.has(extension)) {
+    return {
+      icon: <FileCode size={14} />,
+      tone: "code",
+    };
+  }
+
+  if (sheetFileExtensions.has(extension)) {
+    return {
+      icon: <FileSpreadsheet size={14} />,
+      tone: "data",
+    };
+  }
+
+  if (mediaFileExtensions.has(extension)) {
+    return {
+      icon: <FileImage size={14} />,
+      tone: "media",
+    };
+  }
+
+  if (archiveFileExtensions.has(extension)) {
+    return {
+      icon: <FileArchive size={14} />,
+      tone: "archive",
+    };
+  }
+
+  if (configFileExtensions.has(extension)) {
+    return {
+      icon: <FileCog size={14} />,
+      tone: "data",
+    };
+  }
+
+  if (docFileExtensions.has(extension)) {
+    return {
+      icon: extension === ".md" || extension === ".mdx" ? <FilePenLine size={14} /> : <FileText size={14} />,
+      tone: "doc",
+    };
+  }
+
+  if (normalizedName.includes("license") || normalizedName.includes("changelog")) {
+    return {
+      icon: <FileText size={14} />,
+      tone: "doc",
+    };
+  }
+
+  if (normalizedName.includes("readme")) {
+    return {
+      icon: <FilePenLine size={14} />,
+      tone: "doc",
+    };
+  }
+
+  if (extension === ".sql") {
+    return {
+      icon: <FileSpreadsheet size={14} />,
+      tone: "data",
+    };
+  }
+
+  if (extension === ".proto" || extension === ".graphql") {
+    return {
+      icon: <FileType size={14} />,
+      tone: "data",
+    };
+  }
+
+  return {
+    icon: <File size={14} />,
+    tone: "default",
+  };
+}
+
 function App() {
   const [workspace, setWorkspaceState] = useState<WorkspaceInfo | null>(null);
 
@@ -64,11 +347,16 @@ function App() {
   const [terminalBuffers, setTerminalBuffers] = useState<Record<string, string>>({});
   const terminalBuffersRef = useRef<Record<string, string>>({});
   const terminalWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const terminalResizeQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const terminalSizeKeyBySessionRef = useRef<Record<string, string>>({});
+  const syncTerminalSizeRef = useRef<(force?: boolean) => void>(() => {});
 
   const [pendingPosition, setPendingPosition] = useState<PendingPosition | null>(null);
   const [editorReadySeq, setEditorReadySeq] = useState(0);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+  const [isExplorerVisible, setIsExplorerVisible] = useState(true);
+  const [isTerminalVisible, setIsTerminalVisible] = useState(true);
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
 
@@ -149,7 +437,7 @@ function App() {
     }
   }
 
-  function redrawTerminal(sessionId: string | null): void {
+  const redrawTerminal = useCallback((sessionId: string | null): void => {
     const terminal = terminalRef.current;
     if (!terminal) {
       return;
@@ -169,9 +457,11 @@ function App() {
     }
 
     fitAddonRef.current?.fit();
-  }
+  }, []);
 
   function mergeTerminalSnapshot(snapshot: TerminalSessionSnapshot): void {
+    terminalSizeKeyBySessionRef.current[snapshot.session.id] = `${snapshot.session.cols}x${snapshot.session.rows}`;
+
     setTerminals((previous) => {
       const next = [...previous];
       const existingIndex = next.findIndex((item) => item.id === snapshot.session.id);
@@ -187,7 +477,7 @@ function App() {
     setTerminalBuffers((previous) => {
       const next = {
         ...previous,
-        [snapshot.session.id]: snapshot.lines.join("\r\n"),
+        [snapshot.session.id]: snapshot.buffer,
       };
       terminalBuffersRef.current = next;
       return next;
@@ -196,11 +486,15 @@ function App() {
 
   async function createTerminalSession(): Promise<void> {
     try {
-      const snapshot = await terminalCreate("powershell.exe");
+      const snapshot = await terminalCreate();
       mergeTerminalSnapshot(snapshot);
       activeTerminalIdRef.current = snapshot.session.id;
       setActiveTerminalId(snapshot.session.id);
       redrawTerminal(snapshot.session.id);
+      window.requestAnimationFrame(() => {
+        syncTerminalSizeRef.current(true);
+        terminalRef.current?.focus();
+      });
       setStatusMessage(`Created ${snapshot.session.title}`);
     } catch (error) {
       setStatusMessage(`Failed to create terminal: ${String(error)}`);
@@ -216,11 +510,15 @@ function App() {
       }
 
       setTerminals(sessions);
+      terminalSizeKeyBySessionRef.current = sessions.reduce<Record<string, string>>((accumulator, session) => {
+        accumulator[session.id] = `${session.cols}x${session.rows}`;
+        return accumulator;
+      }, {});
 
       const buffers: Record<string, string> = {};
       for (const session of sessions) {
         const snapshot = await terminalSnapshot(session.id);
-        buffers[session.id] = snapshot.lines.join("\r\n");
+        buffers[session.id] = snapshot.buffer;
       }
 
       setTerminalBuffers(() => {
@@ -236,6 +534,9 @@ function App() {
       activeTerminalIdRef.current = nextActive;
       setActiveTerminalId(nextActive);
       redrawTerminal(nextActive);
+      window.requestAnimationFrame(() => {
+        syncTerminalSizeRef.current(true);
+      });
     } catch (error) {
       setStatusMessage(`Failed to load terminals: ${String(error)}`);
     }
@@ -277,6 +578,8 @@ function App() {
       setTerminals([]);
       setTerminalBuffers({});
       terminalBuffersRef.current = {};
+      terminalSizeKeyBySessionRef.current = {};
+      terminalResizeQueueRef.current = Promise.resolve();
       setActiveTerminalId(null);
       activeTerminalIdRef.current = null;
       redrawTerminal(null);
@@ -431,9 +734,34 @@ function App() {
       const snapshot = await terminalSnapshot(sessionId);
       mergeTerminalSnapshot(snapshot);
       redrawTerminal(sessionId);
+      window.requestAnimationFrame(() => {
+        syncTerminalSizeRef.current(true);
+        terminalRef.current?.focus();
+      });
     } catch (error) {
       setStatusMessage(`Failed to refresh terminal session: ${String(error)}`);
     }
+  }
+
+  async function clearActiveTerminalOutput(): Promise<void> {
+    const sessionId = activeTerminalIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    try {
+      const snapshot = await terminalClear(sessionId);
+      mergeTerminalSnapshot(snapshot);
+      redrawTerminal(sessionId);
+      setStatusMessage("Terminal output cleared.");
+    } catch (error) {
+      setStatusMessage(`Failed to clear terminal output: ${String(error)}`);
+    }
+  }
+
+  function interruptActiveTerminal(): void {
+    queueTerminalInput("\u0003");
+    setStatusMessage("Sent Ctrl+C to terminal.");
   }
 
   async function closeActiveTerminal(): Promise<void> {
@@ -444,6 +772,7 @@ function App() {
 
     try {
       await terminalClose(closeId);
+      delete terminalSizeKeyBySessionRef.current[closeId];
       await refreshTerminalSessions();
       setStatusMessage("Terminal closed.");
     } catch (error) {
@@ -584,13 +913,16 @@ function App() {
       const expanded = Boolean(expandedByPath[node.path]);
       const loading = Boolean(loadingByPath[node.path]);
       const openingFile = !isDirectory && Boolean(openingFilesByPath[node.path]);
+      const visual = isDirectory
+        ? resolveDirectoryVisual(node.name, expanded)
+        : resolveFileVisual(node.name);
 
       return (
         <div key={node.path}>
           <button
             type="button"
             className={`tree-item ${activeTab?.path === node.path ? "active" : ""}`}
-            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            style={{ paddingLeft: `${6 + depth * 11}px` }}
             disabled={loading || openingFile}
             onClick={() => {
               if (isDirectory) {
@@ -609,13 +941,7 @@ function App() {
               void openFile(node.path);
             }}
           >
-            <span className="tree-marker">
-              {isDirectory ? (
-                expanded ? <FolderOpen size={14} /> : <Folder size={14} />
-              ) : (
-                <File size={14} />
-              )}
-            </span>
+            <span className={`tree-marker tone-${visual.tone}`}>{visual.icon}</span>
             <span className="tree-label">{node.name}</span>
             {isDirectory && loading ? <span className="tree-loading">loading...</span> : null}
             {openingFile ? <span className="tree-loading">opening...</span> : null}
@@ -638,10 +964,12 @@ function App() {
     const terminal = new XtermTerminal({
       convertEol: false,
       cursorBlink: true,
+      cursorStyle: "block",
       fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
       fontSize: 13,
       lineHeight: 1.2,
       allowTransparency: true,
+      rightClickSelectsWord: true,
       theme: {
         background: "#000000",
         foreground: "#abb2bf",
@@ -670,14 +998,63 @@ function App() {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(host);
-    fitAddon.fit();
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
-    const resizeObserver = new ResizeObserver(() => {
+    let lastResizeKey = "";
+    const syncTerminalSize = (force = false): void => {
+      const sessionId = activeTerminalIdRef.current;
+      if (!sessionId) {
+        return;
+      }
+
+      const cols = terminal.cols;
+      const rows = terminal.rows;
+      if (cols <= 0 || rows <= 0) {
+        return;
+      }
+
+      const sessionSizeKey = `${sessionId}:${cols}x${rows}`;
+      if (!force && sessionSizeKey === lastResizeKey) {
+        return;
+      }
+
+      lastResizeKey = sessionSizeKey;
+      terminalSizeKeyBySessionRef.current[sessionId] = `${cols}x${rows}`;
+      setTerminals((previous) =>
+        previous.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                cols,
+                rows,
+              }
+            : session,
+        ),
+      );
+
+      terminalResizeQueueRef.current = terminalResizeQueueRef.current
+        .then(() => terminalResize(sessionId, cols, rows))
+        .catch((error) => {
+          setStatusMessage(`Terminal resize failed: ${String(error)}`);
+        });
+    };
+
+    syncTerminalSizeRef.current = syncTerminalSize;
+
+    const fitAndSync = (force = false): void => {
       fitAddon.fit();
+      syncTerminalSize(force);
+    };
+
+    const resizeObserver = new ResizeObserver(() => {
+      fitAndSync(false);
     });
     resizeObserver.observe(host);
+
+    const resizeDisposable = terminal.onResize(() => {
+      syncTerminalSize(false);
+    });
 
     const dataDisposable = terminal.onData((data: string) => {
       queueTerminalInput(data);
@@ -689,11 +1066,16 @@ function App() {
     host.addEventListener("click", clickHandler);
 
     redrawTerminal(activeTerminalIdRef.current);
+    window.requestAnimationFrame(() => {
+      fitAndSync(true);
+    });
 
     return () => {
       host.removeEventListener("click", clickHandler);
       dataDisposable.dispose();
+      resizeDisposable.dispose();
       resizeObserver.disconnect();
+      syncTerminalSizeRef.current = () => {};
       fitAddonRef.current = null;
       terminalRef.current = null;
       terminal.dispose();
@@ -749,9 +1131,34 @@ function App() {
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
+      const terminalHasFocus = Boolean(
+        terminalHostRef.current && document.activeElement && terminalHostRef.current.contains(document.activeElement),
+      );
+
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void saveTab();
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key === "`") {
+        event.preventDefault();
+        terminalRef.current?.focus();
+        return;
+      }
+
+      if (terminalHasFocus && (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) {
+              queueTerminalInput(text);
+            }
+          })
+          .catch((error) => {
+            setStatusMessage(`Paste failed: ${String(error)}`);
+          });
       }
     };
 
@@ -801,8 +1208,41 @@ function App() {
 
   useEffect(() => {
     redrawTerminal(activeTerminalId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTerminalId]);
+
+    if (!activeTerminalId) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      syncTerminalSizeRef.current(true);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [activeTerminalId, redrawTerminal]);
+
+  useEffect(() => {
+    if (!isTerminalVisible) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      redrawTerminal(activeTerminalIdRef.current);
+      syncTerminalSizeRef.current(true);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [isTerminalVisible, redrawTerminal]);
+
+  const workbenchClassName = `workbench-grid${isExplorerVisible ? "" : " explorer-hidden"}`;
+  const mainPanelClassName = `main-panel${isTerminalVisible ? "" : " terminal-hidden"}`;
+  const rootExpanded = workspace ? Boolean(expandedByPath[workspace.rootPath]) : false;
+  const rootVisual = workspace
+    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, true)
+    : null;
 
   return (
     <div className="app-shell">
@@ -818,6 +1258,28 @@ function App() {
           </button>
           <button type="button" className="secondary" onClick={() => void createTerminalSession()}>
             新建终端
+          </button>
+          <button
+            type="button"
+            className="secondary visibility-toggle"
+            aria-label={isExplorerVisible ? "隐藏文件树" : "显示文件树"}
+            aria-pressed={isExplorerVisible}
+            title={isExplorerVisible ? "隐藏文件树" : "显示文件树"}
+            onClick={() => setIsExplorerVisible((previous) => !previous)}
+          >
+            {isExplorerVisible ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+            <span>文件树</span>
+          </button>
+          <button
+            type="button"
+            className="secondary visibility-toggle"
+            aria-label={isTerminalVisible ? "隐藏终端面板" : "显示终端面板"}
+            aria-pressed={isTerminalVisible}
+            title={isTerminalVisible ? "隐藏终端面板" : "显示终端面板"}
+            onClick={() => setIsTerminalVisible((previous) => !previous)}
+          >
+            {isTerminalVisible ? <PanelBottomClose size={14} /> : <PanelBottomOpen size={14} />}
+            <span>终端</span>
           </button>
           <button type="button" className="primary" onClick={() => void saveTab()} disabled={!activeTab}>
             保存
@@ -852,7 +1314,7 @@ function App() {
         </div>
       </header>
 
-      <div className="workbench-grid">
+      <div className={workbenchClassName}>
         <aside className="explorer-panel">
           <div className="panel-title">Explorer</div>
           {workspace ? (
@@ -861,7 +1323,7 @@ function App() {
                 type="button"
                 className="tree-item root"
                 onClick={() => {
-                  const expanded = !expandedByPath[workspace.rootPath];
+                  const expanded = !rootExpanded;
                   setExpandedByPath((previous) => ({
                     ...previous,
                     [workspace.rootPath]: expanded,
@@ -871,12 +1333,12 @@ function App() {
                   }
                 }}
               >
-                <span className="tree-marker">
-                  {expandedByPath[workspace.rootPath] ? <FolderOpen size={14} /> : <Folder size={14} />}
+                <span className={`tree-marker tone-${rootVisual?.tone ?? "default"}`}>
+                  {rootVisual?.icon ?? <Folder size={14} />}
                 </span>
                 <span className="tree-label">{workspace.rootName}</span>
               </button>
-              {expandedByPath[workspace.rootPath] ? (
+              {rootExpanded ? (
                 <div>{renderTree(treeByPath[workspace.rootPath] ?? [], 1)}</div>
               ) : null}
             </div>
@@ -885,7 +1347,7 @@ function App() {
           )}
         </aside>
 
-        <section className="main-panel">
+        <section className={mainPanelClassName}>
           <section className="editor-panel">
             <div className="tab-strip">
               {tabs.map((tab) => (
@@ -943,26 +1405,53 @@ function App() {
                     type="button"
                     className={`terminal-tab ${session.id === activeTerminalId ? "active" : ""}`}
                     onClick={() => void selectTerminal(session.id)}
+                    title={session.cwd}
                   >
-                    {session.title}
+                    <span
+                      className={`terminal-tab-dot ${session.status === "running" ? "running" : "stopped"}`}
+                    />
+                    <span className="terminal-tab-title">{session.title}</span>
                   </button>
                 ))}
               </div>
               <div className="terminal-actions">
                 <button type="button" onClick={() => void createTerminalSession()}>
-                  New
+                  +
                 </button>
-                <button type="button" className="secondary" onClick={() => void closeActiveTerminal()}>
-                  Close
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!activeTerminal}
+                  onClick={() => interruptActiveTerminal()}
+                >
+                  Ctrl+C
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!activeTerminal}
+                  onClick={() => void clearActiveTerminalOutput()}
+                >
+                  清屏
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!activeTerminal}
+                  onClick={() => void closeActiveTerminal()}
+                >
+                  关闭
                 </button>
               </div>
             </div>
 
             <div className="terminal-meta-row">
               <span className="terminal-meta">
-                {activeTerminal ? `${activeTerminal.shell} | ${activeTerminal.cwd}` : "No active terminal"}
+                {activeTerminal ? `${activeTerminal.shell}  ${activeTerminal.cwd}` : "No active terminal"}
               </span>
-              <span className="terminal-meta">Type directly after focusing terminal</span>
+              <span className="terminal-meta">
+                {activeTerminal ? `${activeTerminal.status}  ${activeTerminal.cols}x${activeTerminal.rows}` : ""}
+              </span>
             </div>
 
             <div ref={terminalHostRef} className="terminal-host" />

@@ -63,8 +63,20 @@ export async function terminalSnapshot(sessionId: string): Promise<TerminalSessi
 export async function terminalWrite(
   sessionId: string,
   input: string,
-): Promise<TerminalSessionSnapshot> {
-  return invoke<TerminalSessionSnapshot>("terminal_write", { sessionId, input });
+): Promise<Ack> {
+  return invoke<Ack>("terminal_write", { sessionId, input });
+}
+
+export async function terminalResize(
+  sessionId: string,
+  cols: number,
+  rows: number,
+): Promise<Ack> {
+  return invoke<Ack>("terminal_resize", { sessionId, cols, rows });
+}
+
+export async function terminalClear(sessionId: string): Promise<TerminalSessionSnapshot> {
+  return invoke<TerminalSessionSnapshot>("terminal_clear", { sessionId });
 }
 
 export async function terminalClose(sessionId: string): Promise<Ack> {

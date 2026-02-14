@@ -35,6 +35,8 @@ export interface TerminalSession {
   shell: string;
   cwd: string;
   status: string;
+  cols: number;
+  rows: number;
 }
 
 export interface TerminalCommandResult {
@@ -47,7 +49,7 @@ export interface TerminalCommandResult {
 
 export interface TerminalSessionSnapshot {
   session: TerminalSession;
-  lines: string[];
+  buffer: string;
   lastResult: TerminalCommandResult | null;
 }
 

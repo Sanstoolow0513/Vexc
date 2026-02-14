@@ -1,10 +1,11 @@
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -25,12 +26,18 @@ struct TerminalState {
     shell: String,
     cwd: PathBuf,
     status: String,
-    lines: Vec<String>,
-    stdin: ChildStdin,
-    process: Child,
+    cols: u16,
+    rows: u16,
+    buffer: String,
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    process: Box<dyn portable_pty::Child + Send>,
 }
 
 const MAX_EDITOR_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_TERMINAL_BUFFER_BYTES: usize = 1024 * 1024;
+const DEFAULT_TERMINAL_COLS: u16 = 120;
+const DEFAULT_TERMINAL_ROWS: u16 = 30;
 const IGNORED_DIRECTORY_NAMES: &[&str] = &["node_modules", "dist", "target"];
 
 #[derive(Serialize)]
@@ -80,6 +87,8 @@ struct TerminalSession {
     shell: String,
     cwd: String,
     status: String,
+    cols: u16,
+    rows: u16,
 }
 
 #[derive(Serialize, Clone)]
@@ -96,7 +105,7 @@ struct TerminalCommandResult {
 #[serde(rename_all = "camelCase")]
 struct TerminalSessionSnapshot {
     session: TerminalSession,
-    lines: Vec<String>,
+    buffer: String,
     last_result: Option<TerminalCommandResult>,
 }
 
@@ -352,23 +361,32 @@ fn terminal_create(
     );
     let title = format!("Terminal {}", id.replace("terminal-", ""));
 
-    let mut spawn_command = build_terminal_spawn_command(&shell_value, &cwd);
-    let mut process = spawn_command
-        .spawn()
-        .map_err(|error| format!("Failed to start terminal process: {error}"))?;
+    let pty_system = native_pty_system();
+    let pty_size = PtySize {
+        rows: DEFAULT_TERMINAL_ROWS,
+        cols: DEFAULT_TERMINAL_COLS,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let pty_pair = pty_system
+        .openpty(pty_size)
+        .map_err(|error| format!("Failed to open terminal PTY: {error}"))?;
 
-    let stdin = process
-        .stdin
-        .take()
-        .ok_or_else(|| String::from("Failed to capture terminal stdin"))?;
-    let stdout = process
-        .stdout
-        .take()
-        .ok_or_else(|| String::from("Failed to capture terminal stdout"))?;
-    let stderr = process
-        .stderr
-        .take()
-        .ok_or_else(|| String::from("Failed to capture terminal stderr"))?;
+    let spawn_command = build_terminal_spawn_command(&shell_value, &cwd);
+    let process = pty_pair
+        .slave
+        .spawn_command(spawn_command)
+        .map_err(|error| format!("Failed to start terminal process: {error}"))?;
+    drop(pty_pair.slave);
+
+    let reader = pty_pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("Failed to capture terminal output: {error}"))?;
+    let writer = pty_pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("Failed to capture terminal input: {error}"))?;
 
     let terminal_state = Arc::new(Mutex::new(TerminalState {
         id: id.clone(),
@@ -376,8 +394,11 @@ fn terminal_create(
         shell: shell_value,
         cwd: cwd.clone(),
         status: String::from("running"),
-        lines: vec![format!("Started session in {}", cwd.to_string_lossy())],
-        stdin,
+        cols: DEFAULT_TERMINAL_COLS,
+        rows: DEFAULT_TERMINAL_ROWS,
+        buffer: String::new(),
+        master: pty_pair.master,
+        writer,
         process,
     }));
 
@@ -389,14 +410,7 @@ fn terminal_create(
         terminal_guard.insert(id.clone(), terminal_state.clone());
     }
 
-    spawn_terminal_reader(
-        id.clone(),
-        false,
-        stdout,
-        state.terminals.clone(),
-        app.clone(),
-    );
-    spawn_terminal_reader(id, true, stderr, state.terminals.clone(), app);
+    spawn_terminal_reader(id, reader, state.terminals.clone(), app);
 
     let session = terminal_state
         .lock()
@@ -443,9 +457,9 @@ fn terminal_write(
     session_id: String,
     input: String,
     state: tauri::State<AppState>,
-) -> Result<TerminalSessionSnapshot, String> {
+) -> Result<Ack, String> {
     if input.is_empty() {
-        return Err(String::from("Terminal input cannot be empty"));
+        return Ok(Ack { ok: true });
     }
 
     let session = get_terminal_session(&state, &session_id)?;
@@ -453,24 +467,64 @@ fn terminal_write(
         .lock()
         .map_err(|_| String::from("Failed to lock terminal session"))?;
 
-    if let Some(status) = session_guard
-        .process
-        .try_wait()
-        .map_err(|error| format!("Failed to inspect terminal process: {error}"))?
-    {
-        let exit_code = status.code().unwrap_or(-1);
-        session_guard.status = format!("exited ({exit_code})");
+    if session_guard.status != "running" {
         return Err(String::from("Terminal session has already exited"));
     }
 
     session_guard
-        .stdin
+        .writer
         .write_all(input.as_bytes())
         .map_err(|error| format!("Failed to write to terminal: {error}"))?;
     session_guard
-        .stdin
+        .writer
         .flush()
         .map_err(|error| format!("Failed to flush terminal input: {error}"))?;
+
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn terminal_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    state: tauri::State<AppState>,
+) -> Result<Ack, String> {
+    if cols == 0 || rows == 0 {
+        return Err(String::from("Terminal size must be greater than zero"));
+    }
+
+    let session = get_terminal_session(&state, &session_id)?;
+    let mut session_guard = session
+        .lock()
+        .map_err(|_| String::from("Failed to lock terminal session"))?;
+
+    session_guard
+        .master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("Failed to resize terminal: {error}"))?;
+    session_guard.cols = cols;
+    session_guard.rows = rows;
+
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn terminal_clear(
+    session_id: String,
+    state: tauri::State<AppState>,
+) -> Result<TerminalSessionSnapshot, String> {
+    let session = get_terminal_session(&state, &session_id)?;
+    let mut session_guard = session
+        .lock()
+        .map_err(|_| String::from("Failed to lock terminal session"))?;
+
+    session_guard.buffer.clear();
 
     Ok(terminal_state_to_snapshot(&session_guard, None))
 }
@@ -491,8 +545,6 @@ fn terminal_close(session_id: String, state: tauri::State<AppState>) -> Result<A
             .map_err(|_| String::from("Failed to lock terminal session"))?;
         guard.status = String::from("closed");
 
-        let _ = guard.stdin.write_all(b"exit\n");
-        let _ = guard.stdin.flush();
         let _ = guard.process.kill();
         let _ = guard.process.wait();
     }
@@ -598,6 +650,8 @@ fn terminal_state_to_session(state: &TerminalState) -> TerminalSession {
         shell: state.shell.clone(),
         cwd: state.cwd.to_string_lossy().to_string(),
         status: state.status.clone(),
+        cols: state.cols,
+        rows: state.rows,
     }
 }
 
@@ -607,7 +661,7 @@ fn terminal_state_to_snapshot(
 ) -> TerminalSessionSnapshot {
     TerminalSessionSnapshot {
         session: terminal_state_to_session(state),
-        lines: state.lines.clone(),
+        buffer: state.buffer.clone(),
         last_result,
     }
 }
@@ -627,32 +681,25 @@ fn get_terminal_session(
         .ok_or_else(|| String::from("Terminal session not found"))
 }
 
-fn build_terminal_spawn_command(shell: &str, cwd: &Path) -> Command {
+fn build_terminal_spawn_command(shell: &str, cwd: &Path) -> CommandBuilder {
     let shell_lower = shell.to_lowercase();
-    let mut command = Command::new(shell);
+    let mut command = CommandBuilder::new(shell);
 
     if shell_lower.contains("powershell") || shell_lower.contains("pwsh") {
         command.args(["-NoLogo", "-NoProfile"]);
     }
 
-    command
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.cwd(cwd);
 
     command
 }
 
-fn spawn_terminal_reader<R>(
+fn spawn_terminal_reader(
     session_id: String,
-    is_error: bool,
-    mut reader: R,
+    mut reader: Box<dyn Read + Send>,
     terminals: Arc<Mutex<HashMap<String, Arc<Mutex<TerminalState>>>>>,
     app: tauri::AppHandle,
-) where
-    R: Read + Send + 'static,
-{
+) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
         loop {
@@ -668,7 +715,7 @@ fn spawn_terminal_reader<R>(
                         if let Some(session) = terminal_guard.get(&session_id).cloned() {
                             drop(terminal_guard);
                             if let Ok(mut session_guard) = session.lock() {
-                                append_terminal_lines(&mut session_guard.lines, &chunk, is_error);
+                                append_terminal_output(&mut session_guard.buffer, &chunk);
                             }
                         }
                     }
@@ -678,7 +725,7 @@ fn spawn_terminal_reader<R>(
                         TerminalOutputEvent {
                             session_id: session_id.clone(),
                             chunk,
-                            is_error,
+                            is_error: false,
                         },
                     );
                 }
@@ -699,19 +746,16 @@ fn spawn_terminal_reader<R>(
     });
 }
 
-fn append_terminal_lines(lines: &mut Vec<String>, chunk: &str, is_error: bool) {
-    let normalized = chunk.replace("\r\n", "\n").replace('\r', "\n");
-    for line in normalized.split('\n') {
-        if is_error {
-            lines.push(format!("[stderr] {line}"));
-        } else {
-            lines.push(line.to_string());
-        }
-    }
+fn append_terminal_output(output: &mut String, chunk: &str) {
+    output.push_str(chunk);
 
-    if lines.len() > 1800 {
-        let overflow = lines.len() - 1800;
-        lines.drain(0..overflow);
+    if output.len() > MAX_TERMINAL_BUFFER_BYTES {
+        let overflow = output.len() - MAX_TERMINAL_BUFFER_BYTES;
+        let mut drain_to = overflow;
+        while drain_to < output.len() && !output.is_char_boundary(drain_to) {
+            drain_to += 1;
+        }
+        output.drain(..drain_to);
     }
 }
 
@@ -919,6 +963,8 @@ pub fn run() {
             terminal_list,
             terminal_snapshot,
             terminal_write,
+            terminal_resize,
+            terminal_clear,
             terminal_close,
             ai_provider_suggestions,
             ai_run
