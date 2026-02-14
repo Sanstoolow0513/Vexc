@@ -38,7 +38,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal as XtermTerminal } from "@xterm/xterm";
+import { Terminal as XtermTerminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
   getWorkspace,
@@ -66,6 +66,215 @@ import { detectLanguage, fileNameFromPath } from "./utils";
 import "./App.css";
 
 const WORKSPACE_STORAGE_KEY = "vexc.workspacePath";
+const COLOR_THEME_STORAGE_KEY = "vexc.colorTheme";
+const FILE_ICON_THEME_STORAGE_KEY = "vexc.fileIconTheme";
+
+type ColorThemeId = "dark-plus" | "light-plus" | "one-dark-pro-orange";
+type FileIconThemeId = "vscode-colored" | "vscode-minimal";
+
+interface ColorThemeOption {
+  id: ColorThemeId;
+  label: string;
+  monacoThemeName: string;
+  monacoThemeData: MonacoEditor.IStandaloneThemeData;
+  terminalTheme: ITheme;
+}
+
+interface FileIconThemeOption {
+  id: FileIconThemeId;
+  label: string;
+}
+
+const DEFAULT_COLOR_THEME_ID: ColorThemeId = "dark-plus";
+const DEFAULT_FILE_ICON_THEME_ID: FileIconThemeId = "vscode-colored";
+
+const colorThemeOptions: readonly ColorThemeOption[] = [
+  {
+    id: "dark-plus",
+    label: "Dark+ (VS Code)",
+    monacoThemeName: "vexc-dark-plus",
+    monacoThemeData: {
+      base: "vs-dark",
+      inherit: true,
+      rules: [
+        { token: "keyword", foreground: "569cd6" },
+        { token: "variable", foreground: "9cdcfe" },
+        { token: "string", foreground: "ce9178" },
+        { token: "function", foreground: "dcdcaa" },
+        { token: "number", foreground: "b5cea8" },
+        { token: "comment", foreground: "6a9955", fontStyle: "italic" },
+        { token: "type", foreground: "4ec9b0" },
+      ],
+      colors: {
+        "editor.background": "#1e1e1e",
+        "editor.foreground": "#d4d4d4",
+        "editorCursor.foreground": "#aeafad",
+        "editor.lineHighlightBackground": "#2a2d2e",
+        "editor.selectionBackground": "#264f78",
+        "editor.inactiveSelectionBackground": "#3a3d41",
+      },
+    },
+    terminalTheme: {
+      background: "#1e1e1e",
+      foreground: "#d4d4d4",
+      cursor: "#aeafad",
+      selectionBackground: "rgba(38, 79, 120, 0.35)",
+      black: "#000000",
+      red: "#cd3131",
+      green: "#0dbc79",
+      yellow: "#e5e510",
+      blue: "#2472c8",
+      magenta: "#bc3fbc",
+      cyan: "#11a8cd",
+      white: "#e5e5e5",
+      brightBlack: "#666666",
+      brightRed: "#f14c4c",
+      brightGreen: "#23d18b",
+      brightYellow: "#f5f543",
+      brightBlue: "#3b8eea",
+      brightMagenta: "#d670d6",
+      brightCyan: "#29b8db",
+      brightWhite: "#e5e5e5",
+    },
+  },
+  {
+    id: "light-plus",
+    label: "Light+ (VS Code)",
+    monacoThemeName: "vexc-light-plus",
+    monacoThemeData: {
+      base: "vs",
+      inherit: true,
+      rules: [
+        { token: "keyword", foreground: "0000ff" },
+        { token: "variable", foreground: "001080" },
+        { token: "string", foreground: "a31515" },
+        { token: "function", foreground: "795e26" },
+        { token: "number", foreground: "098658" },
+        { token: "comment", foreground: "008000", fontStyle: "italic" },
+        { token: "type", foreground: "267f99" },
+      ],
+      colors: {
+        "editor.background": "#ffffff",
+        "editor.foreground": "#333333",
+        "editorCursor.foreground": "#111111",
+        "editor.lineHighlightBackground": "#f5f5f5",
+        "editor.selectionBackground": "#add6ff",
+        "editor.inactiveSelectionBackground": "#e5ebf1",
+      },
+    },
+    terminalTheme: {
+      background: "#ffffff",
+      foreground: "#222222",
+      cursor: "#1f2328",
+      selectionBackground: "rgba(10, 103, 206, 0.25)",
+      black: "#000000",
+      red: "#a1260d",
+      green: "#007100",
+      yellow: "#795e26",
+      blue: "#0451a5",
+      magenta: "#bc05bc",
+      cyan: "#0598bc",
+      white: "#a5a5a5",
+      brightBlack: "#666666",
+      brightRed: "#cd3131",
+      brightGreen: "#14ce14",
+      brightYellow: "#b5ba00",
+      brightBlue: "#0451a5",
+      brightMagenta: "#bc05bc",
+      brightCyan: "#0598bc",
+      brightWhite: "#a5a5a5",
+    },
+  },
+  {
+    id: "one-dark-pro-orange",
+    label: "One Dark Pro Orange",
+    monacoThemeName: "vexc-one-dark-pro-orange",
+    monacoThemeData: {
+      base: "vs-dark",
+      inherit: true,
+      rules: [
+        { token: "keyword", foreground: "c678dd" },
+        { token: "variable", foreground: "e06c75" },
+        { token: "string", foreground: "98c379" },
+        { token: "function", foreground: "61afef" },
+        { token: "number", foreground: "d19a66" },
+        { token: "comment", foreground: "5c6370", fontStyle: "italic" },
+        { token: "type", foreground: "e5c07b" },
+      ],
+      colors: {
+        "editor.background": "#0a0c10",
+        "editor.foreground": "#abb2bf",
+        "editorCursor.foreground": "#d19a66",
+        "editor.lineHighlightBackground": "#13161c",
+        "editor.selectionBackground": "#2c313a",
+        "editor.inactiveSelectionBackground": "#1c1f26",
+      },
+    },
+    terminalTheme: {
+      background: "#000000",
+      foreground: "#abb2bf",
+      cursor: "#d19a66",
+      selectionBackground: "rgba(209, 154, 102, 0.2)",
+      black: "#000000",
+      red: "#e06c75",
+      green: "#98c379",
+      yellow: "#e5c07b",
+      blue: "#61afef",
+      magenta: "#c678dd",
+      cyan: "#56b6c2",
+      white: "#abb2bf",
+      brightBlack: "#4b5263",
+      brightRed: "#e06c75",
+      brightGreen: "#98c379",
+      brightYellow: "#e5c07b",
+      brightBlue: "#61afef",
+      brightMagenta: "#c678dd",
+      brightCyan: "#56b6c2",
+      brightWhite: "#abb2bf",
+    },
+  },
+];
+
+const colorThemeConfigById: Record<ColorThemeId, ColorThemeOption> = {
+  "dark-plus": colorThemeOptions[0],
+  "light-plus": colorThemeOptions[1],
+  "one-dark-pro-orange": colorThemeOptions[2],
+};
+
+function isColorThemeId(value: string): value is ColorThemeId {
+  return Object.prototype.hasOwnProperty.call(colorThemeConfigById, value);
+}
+
+function resolveColorThemeById(themeId: string | null): ColorThemeOption {
+  if (themeId && isColorThemeId(themeId)) {
+    return colorThemeConfigById[themeId];
+  }
+  return colorThemeConfigById[DEFAULT_COLOR_THEME_ID];
+}
+
+const fileIconThemeOptions: readonly FileIconThemeOption[] = [
+  {
+    id: "vscode-colored",
+    label: "VSCode Colored",
+  },
+  {
+    id: "vscode-minimal",
+    label: "VSCode Minimal",
+  },
+];
+
+function readStoredColorThemeId(): ColorThemeId {
+  const stored = localStorage.getItem(COLOR_THEME_STORAGE_KEY);
+  return resolveColorThemeById(stored).id;
+}
+
+function readStoredFileIconThemeId(): FileIconThemeId {
+  const stored = localStorage.getItem(FILE_ICON_THEME_STORAGE_KEY);
+  if (stored === "vscode-colored" || stored === "vscode-minimal") {
+    return stored;
+  }
+  return DEFAULT_FILE_ICON_THEME_ID;
+}
 
 interface PendingPosition {
   tabId: string;
@@ -169,10 +378,35 @@ function extensionFromName(name: string): string {
   return normalizedName.slice(extensionIndex);
 }
 
-function resolveDirectoryVisual(name: string, expanded: boolean, isRoot = false): TreeNodeVisual {
+type DirectoryVisualKind = "root" | "git" | "code" | "config" | "build" | "secure" | "inspection" | "default";
+type FileVisualKind =
+  | "secure"
+  | "docker"
+  | "script"
+  | "code"
+  | "sheet"
+  | "media"
+  | "archive"
+  | "config"
+  | "doc-markdown"
+  | "doc"
+  | "schema"
+  | "default";
+
+interface DirectoryVisualDescriptor {
+  kind: DirectoryVisualKind;
+  tone: TreeIconTone;
+}
+
+interface FileVisualDescriptor {
+  kind: FileVisualKind;
+  tone: TreeIconTone;
+}
+
+function describeDirectoryVisual(name: string, isRoot = false): DirectoryVisualDescriptor {
   if (isRoot) {
     return {
-      icon: <FolderRoot size={14} />,
+      kind: "root",
       tone: "code",
     };
   }
@@ -181,151 +415,334 @@ function resolveDirectoryVisual(name: string, expanded: boolean, isRoot = false)
 
   if (normalizedName === ".git") {
     return {
-      icon: <FolderGit2 size={14} />,
+      kind: "git",
       tone: "data",
     };
   }
 
   if (codeDirectoryNames.has(normalizedName)) {
     return {
-      icon: <FolderCode size={14} />,
+      kind: "code",
       tone: "code",
     };
   }
 
   if (configDirectoryNames.has(normalizedName)) {
     return {
-      icon: <FolderCog size={14} />,
+      kind: "config",
       tone: "data",
     };
   }
 
   if (buildDirectoryNames.has(normalizedName)) {
     return {
-      icon: <FolderArchive size={14} />,
+      kind: "build",
       tone: "archive",
     };
   }
 
   if (secureDirectoryNames.has(normalizedName)) {
     return {
-      icon: <FolderLock size={14} />,
+      kind: "secure",
       tone: "secure",
     };
   }
 
   if (inspectionDirectoryNames.has(normalizedName)) {
     return {
-      icon: <FolderSearch size={14} />,
+      kind: "inspection",
       tone: "doc",
     };
   }
 
   return {
-    icon: expanded ? <FolderOpen size={14} /> : <Folder size={14} />,
+    kind: "default",
     tone: "default",
   };
 }
 
-function resolveFileVisual(name: string): TreeNodeVisual {
+function describeFileVisual(name: string): FileVisualDescriptor {
   const normalizedName = name.toLowerCase();
   const extension = extensionFromName(name);
 
   if (normalizedName.startsWith(".env")) {
     return {
-      icon: <FileLock size={14} />,
+      kind: "secure",
       tone: "secure",
     };
   }
 
   if (normalizedName === "dockerfile") {
     return {
-      icon: <FileTerminal size={14} />,
+      kind: "docker",
       tone: "script",
     };
   }
 
   if (scriptFileExtensions.has(extension)) {
     return {
-      icon: <FileTerminal size={14} />,
+      kind: "script",
       tone: "script",
     };
   }
 
   if (codeFileExtensions.has(extension)) {
     return {
-      icon: <FileCode size={14} />,
+      kind: "code",
       tone: "code",
     };
   }
 
   if (sheetFileExtensions.has(extension)) {
     return {
-      icon: <FileSpreadsheet size={14} />,
+      kind: "sheet",
       tone: "data",
     };
   }
 
   if (mediaFileExtensions.has(extension)) {
     return {
-      icon: <FileImage size={14} />,
+      kind: "media",
       tone: "media",
     };
   }
 
   if (archiveFileExtensions.has(extension)) {
     return {
-      icon: <FileArchive size={14} />,
+      kind: "archive",
       tone: "archive",
     };
   }
 
   if (configFileExtensions.has(extension)) {
     return {
-      icon: <FileCog size={14} />,
+      kind: "config",
       tone: "data",
     };
   }
 
   if (docFileExtensions.has(extension)) {
     return {
-      icon: extension === ".md" || extension === ".mdx" ? <FilePenLine size={14} /> : <FileText size={14} />,
+      kind: extension === ".md" || extension === ".mdx" ? "doc-markdown" : "doc",
       tone: "doc",
     };
   }
 
   if (normalizedName.includes("license") || normalizedName.includes("changelog")) {
     return {
-      icon: <FileText size={14} />,
+      kind: "doc",
       tone: "doc",
     };
   }
 
   if (normalizedName.includes("readme")) {
     return {
-      icon: <FilePenLine size={14} />,
+      kind: "doc-markdown",
       tone: "doc",
     };
   }
 
   if (extension === ".sql") {
     return {
-      icon: <FileSpreadsheet size={14} />,
+      kind: "sheet",
       tone: "data",
     };
   }
 
   if (extension === ".proto" || extension === ".graphql") {
     return {
-      icon: <FileType size={14} />,
+      kind: "schema",
       tone: "data",
     };
   }
 
   return {
-    icon: <File size={14} />,
+    kind: "default",
     tone: "default",
   };
+}
+
+function toneForMinimalIcons(tone: TreeIconTone): TreeIconTone {
+  if (tone === "secure" || tone === "media") {
+    return tone;
+  }
+  return "default";
+}
+
+function resolveDirectoryVisual(
+  name: string,
+  expanded: boolean,
+  iconThemeId: FileIconThemeId,
+  isRoot = false,
+): TreeNodeVisual {
+  const descriptor = describeDirectoryVisual(name, isRoot);
+
+  if (iconThemeId === "vscode-minimal") {
+    switch (descriptor.kind) {
+      case "root":
+        return {
+          icon: <FolderRoot size={14} />,
+          tone: "default",
+        };
+      case "git":
+        return {
+          icon: <FolderGit2 size={14} />,
+          tone: "default",
+        };
+      case "secure":
+        return {
+          icon: <FolderLock size={14} />,
+          tone: "secure",
+        };
+      default:
+        return {
+          icon: expanded ? <FolderOpen size={14} /> : <Folder size={14} />,
+          tone: toneForMinimalIcons(descriptor.tone),
+        };
+    }
+  }
+
+  switch (descriptor.kind) {
+    case "root":
+      return {
+        icon: <FolderRoot size={14} />,
+        tone: descriptor.tone,
+      };
+    case "git":
+      return {
+        icon: <FolderGit2 size={14} />,
+        tone: descriptor.tone,
+      };
+    case "code":
+      return {
+        icon: <FolderCode size={14} />,
+        tone: descriptor.tone,
+      };
+    case "config":
+      return {
+        icon: <FolderCog size={14} />,
+        tone: descriptor.tone,
+      };
+    case "build":
+      return {
+        icon: <FolderArchive size={14} />,
+        tone: descriptor.tone,
+      };
+    case "secure":
+      return {
+        icon: <FolderLock size={14} />,
+        tone: descriptor.tone,
+      };
+    case "inspection":
+      return {
+        icon: <FolderSearch size={14} />,
+        tone: descriptor.tone,
+      };
+    default:
+      return {
+        icon: expanded ? <FolderOpen size={14} /> : <Folder size={14} />,
+        tone: descriptor.tone,
+      };
+  }
+}
+
+function resolveFileVisual(name: string, iconThemeId: FileIconThemeId): TreeNodeVisual {
+  const descriptor = describeFileVisual(name);
+
+  if (iconThemeId === "vscode-minimal") {
+    switch (descriptor.kind) {
+      case "secure":
+        return {
+          icon: <FileLock size={14} />,
+          tone: "secure",
+        };
+      case "media":
+        return {
+          icon: <FileImage size={14} />,
+          tone: "media",
+        };
+      case "archive":
+        return {
+          icon: <FileArchive size={14} />,
+          tone: "default",
+        };
+      case "doc-markdown":
+        return {
+          icon: <FilePenLine size={14} />,
+          tone: "default",
+        };
+      case "script":
+      case "docker":
+        return {
+          icon: <FileTerminal size={14} />,
+          tone: "default",
+        };
+      default:
+        return {
+          icon: <FileText size={14} />,
+          tone: toneForMinimalIcons(descriptor.tone),
+        };
+    }
+  }
+
+  switch (descriptor.kind) {
+    case "secure":
+      return {
+        icon: <FileLock size={14} />,
+        tone: descriptor.tone,
+      };
+    case "docker":
+    case "script":
+      return {
+        icon: <FileTerminal size={14} />,
+        tone: descriptor.tone,
+      };
+    case "code":
+      return {
+        icon: <FileCode size={14} />,
+        tone: descriptor.tone,
+      };
+    case "sheet":
+      return {
+        icon: <FileSpreadsheet size={14} />,
+        tone: descriptor.tone,
+      };
+    case "media":
+      return {
+        icon: <FileImage size={14} />,
+        tone: descriptor.tone,
+      };
+    case "archive":
+      return {
+        icon: <FileArchive size={14} />,
+        tone: descriptor.tone,
+      };
+    case "config":
+      return {
+        icon: <FileCog size={14} />,
+        tone: descriptor.tone,
+      };
+    case "doc-markdown":
+      return {
+        icon: <FilePenLine size={14} />,
+        tone: descriptor.tone,
+      };
+    case "doc":
+      return {
+        icon: <FileText size={14} />,
+        tone: descriptor.tone,
+      };
+    case "schema":
+      return {
+        icon: <FileType size={14} />,
+        tone: descriptor.tone,
+      };
+    default:
+      return {
+        icon: <File size={14} />,
+        tone: descriptor.tone,
+      };
+  }
 }
 
 function App() {
@@ -357,10 +774,20 @@ function App() {
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [isExplorerVisible, setIsExplorerVisible] = useState(true);
   const [isTerminalVisible, setIsTerminalVisible] = useState(true);
+  const [activeColorThemeId, setActiveColorThemeId] = useState<ColorThemeId>(() => readStoredColorThemeId());
+  const [activeFileIconThemeId, setActiveFileIconThemeId] = useState<FileIconThemeId>(() =>
+    readStoredFileIconThemeId(),
+  );
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
+  const activeColorTheme = useMemo(
+    () => colorThemeConfigById[activeColorThemeId],
+    [activeColorThemeId],
+  );
 
   const monacoEditorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const monacoApiRef = useRef<typeof import("monaco-editor") | null>(null);
+  const monacoThemesRegisteredRef = useRef(false);
   const terminalRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
@@ -376,6 +803,40 @@ function App() {
   useEffect(() => {
     terminalBuffersRef.current = terminalBuffers;
   }, [terminalBuffers]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-color-theme", activeColorThemeId);
+    localStorage.setItem(COLOR_THEME_STORAGE_KEY, activeColorThemeId);
+  }, [activeColorThemeId]);
+
+  useEffect(() => {
+    const selectedTheme = resolveColorThemeById(activeColorThemeId);
+
+    const monacoApi = monacoApiRef.current;
+    if (monacoApi) {
+      try {
+        monacoApi.editor.setTheme(selectedTheme.monacoThemeName);
+      } catch (error) {
+        setStatusMessage(`Failed to apply editor theme: ${String(error)}`);
+      }
+    }
+  }, [activeColorThemeId]);
+
+  useEffect(() => {
+    const selectedTheme = resolveColorThemeById(activeColorThemeId);
+    const terminal = terminalRef.current;
+    if (terminal) {
+      try {
+        terminal.options.theme = selectedTheme.terminalTheme;
+      } catch (error) {
+        setStatusMessage(`Failed to apply terminal theme: ${String(error)}`);
+      }
+    }
+  }, [activeColorThemeId]);
+
+  useEffect(() => {
+    localStorage.setItem(FILE_ICON_THEME_STORAGE_KEY, activeFileIconThemeId);
+  }, [activeFileIconThemeId]);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
@@ -818,32 +1279,21 @@ function App() {
     monacoApi: typeof import("monaco-editor"),
   ): void {
     monacoEditorRef.current = editor;
+    monacoApiRef.current = monacoApi;
     setEditorReadySeq((value) => value + 1);
 
-    // 定义 One Dark Pro 自定义主题
-    monacoApi.editor.defineTheme('one-dark-pro-orange', {
-      base: 'vs-dark',
-      inherit: true,
-      rules: [
-        { token: 'keyword', foreground: 'c678dd' },
-        { token: 'variable', foreground: 'e06c75' },
-        { token: 'string', foreground: '98c379' },
-        { token: 'function', foreground: '61afef' },
-        { token: 'number', foreground: 'd19a66' },
-        { token: 'comment', foreground: '5c6370', fontStyle: 'italic' },
-        { token: 'type', foreground: 'e5c07b' },
-      ],
-      colors: {
-        'editor.background': '#0a0c10',
-        'editor.foreground': '#abb2bf',
-        'editorCursor.foreground': '#d19a66',
-        'editor.lineHighlightBackground': '#13161c',
-        'editor.selectionBackground': '#2c313a',
-        'editor.inactiveSelectionBackground': '#1c1f26',
+    if (!monacoThemesRegisteredRef.current) {
+      for (const theme of colorThemeOptions) {
+        monacoApi.editor.defineTheme(theme.monacoThemeName, theme.monacoThemeData);
       }
-    });
+      monacoThemesRegisteredRef.current = true;
+    }
 
-    monacoApi.editor.setTheme('one-dark-pro-orange');
+    try {
+      monacoApi.editor.setTheme(activeColorTheme.monacoThemeName);
+    } catch (error) {
+      setStatusMessage(`Failed to apply editor theme: ${String(error)}`);
+    }
 
     editor.addCommand(monacoApi.KeyMod.CtrlCmd | monacoApi.KeyCode.KeyS, () => {
       void saveTab();
@@ -914,8 +1364,8 @@ function App() {
       const loading = Boolean(loadingByPath[node.path]);
       const openingFile = !isDirectory && Boolean(openingFilesByPath[node.path]);
       const visual = isDirectory
-        ? resolveDirectoryVisual(node.name, expanded)
-        : resolveFileVisual(node.name);
+        ? resolveDirectoryVisual(node.name, expanded, activeFileIconThemeId)
+        : resolveFileVisual(node.name, activeFileIconThemeId);
 
       return (
         <div key={node.path}>
@@ -970,28 +1420,7 @@ function App() {
       lineHeight: 1.2,
       allowTransparency: true,
       rightClickSelectsWord: true,
-      theme: {
-        background: "#000000",
-        foreground: "#abb2bf",
-        cursor: "#d19a66",
-        selectionBackground: "rgba(209, 154, 102, 0.2)",
-        black: "#000000",
-        red: "#e06c75",
-        green: "#98c379",
-        yellow: "#e5c07b",
-        blue: "#61afef",
-        magenta: "#c678dd",
-        cyan: "#56b6c2",
-        white: "#abb2bf",
-        brightBlack: "#4b5263",
-        brightRed: "#e06c75",
-        brightGreen: "#98c379",
-        brightYellow: "#e5c07b",
-        brightBlue: "#61afef",
-        brightMagenta: "#c678dd",
-        brightCyan: "#56b6c2",
-        brightWhite: "#abb2bf",
-      },
+      theme: activeColorTheme.terminalTheme,
       scrollback: 20000,
     });
 
@@ -1241,7 +1670,7 @@ function App() {
   const mainPanelClassName = `main-panel${isTerminalVisible ? "" : " terminal-hidden"}`;
   const rootExpanded = workspace ? Boolean(expandedByPath[workspace.rootPath]) : false;
   const rootVisual = workspace
-    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, true)
+    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, activeFileIconThemeId, true)
     : null;
 
   return (
@@ -1281,6 +1710,44 @@ function App() {
             {isTerminalVisible ? <PanelBottomClose size={14} /> : <PanelBottomOpen size={14} />}
             <span>终端</span>
           </button>
+          <label className="theme-select-wrap" title="选择颜色主题">
+            <span className="theme-select-label">颜色</span>
+            <select
+              className="theme-select"
+              aria-label="颜色主题"
+              value={activeColorThemeId}
+              onChange={(event) => {
+                const nextThemeId = event.target.value;
+                if (isColorThemeId(nextThemeId)) {
+                  setActiveColorThemeId(nextThemeId);
+                  return;
+                }
+
+                setStatusMessage(`Ignored unsupported color theme: ${nextThemeId}`);
+              }}
+            >
+              {colorThemeOptions.map((theme) => (
+                <option key={theme.id} value={theme.id}>
+                  {theme.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="theme-select-wrap" title="选择文件图标主题">
+            <span className="theme-select-label">图标</span>
+            <select
+              className="theme-select"
+              aria-label="文件图标主题"
+              value={activeFileIconThemeId}
+              onChange={(event) => setActiveFileIconThemeId(event.target.value as FileIconThemeId)}
+            >
+              {fileIconThemeOptions.map((theme) => (
+                <option key={theme.id} value={theme.id}>
+                  {theme.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <button type="button" className="primary" onClick={() => void saveTab()} disabled={!activeTab}>
             保存
           </button>
@@ -1371,7 +1838,7 @@ function App() {
                   value={activeTab.content}
                   onMount={handleEditorMount}
                   onChange={(value) => updateActiveTabContent(value ?? "")}
-                  theme="one-dark-pro-orange"
+                  theme={activeColorTheme.monacoThemeName}
                   className="editor-monaco"
                   height="100%"
                   options={{
@@ -1443,15 +1910,6 @@ function App() {
                   关闭
                 </button>
               </div>
-            </div>
-
-            <div className="terminal-meta-row">
-              <span className="terminal-meta">
-                {activeTerminal ? `${activeTerminal.shell}  ${activeTerminal.cwd}` : "No active terminal"}
-              </span>
-              <span className="terminal-meta">
-                {activeTerminal ? `${activeTerminal.status}  ${activeTerminal.cols}x${activeTerminal.rows}` : ""}
-              </span>
             </div>
 
             <div ref={terminalHostRef} className="terminal-host" />

@@ -4,6 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
+
 Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by VSCode. The project aims to provide a lightweight, fast, and secure local-first coding experience.
 
 **Current Status**: Foundation phase (M0) - building workbench layout, editor engine, and backend file commands.
