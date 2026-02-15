@@ -1,5 +1,7 @@
 import {
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   useCallback,
@@ -16,6 +18,7 @@ import {
   FileCode,
   FileCog,
   FileImage,
+  FilePlus2,
   FileLock,
   FilePenLine,
   FileSpreadsheet,
@@ -29,10 +32,15 @@ import {
   FolderGit2,
   FolderLock,
   FolderOpen,
+  FolderPlus,
   FolderRoot,
   FolderSearch,
+  Info,
   Minus,
+  Pencil,
+  Save,
   Square,
+  Trash2,
   X,
 } from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
@@ -43,9 +51,14 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XtermTerminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
+  createDirectory,
+  createFile,
+  deletePath,
   getWorkspace,
   listDirectory,
+  movePath,
   readFile,
+  renamePath,
   setWorkspace,
   terminalClose,
   terminalCreate,
@@ -57,6 +70,7 @@ import {
 } from "./api";
 import type {
   EditorTab,
+  FileKind,
   FileNode,
   TerminalOutputEvent,
   TerminalSession,
@@ -98,6 +112,7 @@ const EXPLORER_DEFAULT_WIDTH = 270;
 const EXPLORER_MIN_WIDTH = 180;
 const EXPLORER_RESIZER_WIDTH = 6;
 const EXPLORER_MAIN_PANEL_MIN_WIDTH = 260;
+const TREE_DRAG_SOURCE_MIME = "application/x-vexc-tree-drag-source";
 
 function clampTerminalBuffer(value: string): string {
   if (value.length <= MAX_TERMINAL_BUFFER_CHARS) {
@@ -307,6 +322,48 @@ interface WorkbenchTabTarget {
   id: string;
 }
 
+interface TreeContextMenuState {
+  path: string;
+  kind: FileKind;
+  x: number;
+  y: number;
+}
+
+interface TreeDragSource {
+  path: string;
+  kind: FileKind;
+}
+
+type TreeDropRejectionReason =
+  | "missing-source"
+  | "same-path"
+  | "same-parent"
+  | "target-inside-source";
+
+function parseTreeDragSourcePayload(payload: string): TreeDragSource | null {
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as Partial<TreeDragSource>;
+    if (!parsed || typeof parsed.path !== "string") {
+      return null;
+    }
+
+    if (parsed.kind !== "file" && parsed.kind !== "directory") {
+      return null;
+    }
+
+    return {
+      path: parsed.path,
+      kind: parsed.kind,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function resolveWorkbenchFallbackAfterClose(
   fileTabs: readonly EditorTab[],
   terminalSessions: readonly TerminalSession[],
@@ -333,6 +390,95 @@ function resolveWorkbenchFallbackAfterClose(
 
   const fallbackIndex = Math.max(0, removeIndex - 1);
   return remainingTargets[fallbackIndex] ?? remainingTargets[remainingTargets.length - 1];
+}
+
+function normalizePathForComparison(path: string): string {
+  if (!path) {
+    return path;
+  }
+
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized === "/") {
+    return normalized;
+  }
+
+  const trimmed = normalized.replace(/\/+$/, "");
+  return trimmed || normalized;
+}
+
+function isSamePath(left: string, right: string): boolean {
+  return normalizePathForComparison(left) === normalizePathForComparison(right);
+}
+
+function isSameOrDescendantPath(candidatePath: string, targetPath: string): boolean {
+  const normalizedCandidate = normalizePathForComparison(candidatePath);
+  const normalizedTarget = normalizePathForComparison(targetPath);
+
+  return normalizedCandidate === normalizedTarget || normalizedCandidate.startsWith(`${normalizedTarget}/`);
+}
+
+function inferPathSeparator(path: string): "/" | "\\" {
+  return path.includes("\\") ? "\\" : "/";
+}
+
+function applyPathSeparator(path: string, separator: "/" | "\\"): string {
+  if (separator === "\\") {
+    return path.replace(/\//g, "\\");
+  }
+  return path;
+}
+
+function replacePathPrefix(path: string, previousPrefix: string, nextPrefix: string): string {
+  if (!isSameOrDescendantPath(path, previousPrefix)) {
+    return path;
+  }
+
+  const normalizedPath = normalizePathForComparison(path);
+  const normalizedPrevious = normalizePathForComparison(previousPrefix);
+  const normalizedNext = normalizePathForComparison(nextPrefix);
+  const suffix = normalizedPath.slice(normalizedPrevious.length);
+  const mappedPath = `${normalizedNext}${suffix}`;
+
+  return applyPathSeparator(mappedPath, inferPathSeparator(nextPrefix));
+}
+
+function joinPath(basePath: string, name: string): string {
+  const separator = inferPathSeparator(basePath);
+  if (basePath.endsWith("/") || basePath.endsWith("\\")) {
+    return `${basePath}${name}`;
+  }
+  return `${basePath}${separator}${name}`;
+}
+
+function parentPath(path: string): string | null {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const lastSlashIndex = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  if (lastSlashIndex < 0) {
+    return null;
+  }
+
+  if (lastSlashIndex === 0) {
+    return trimmed.slice(0, 1);
+  }
+
+  if (lastSlashIndex === 2 && trimmed[1] === ":") {
+    return `${trimmed.slice(0, 2)}\\`;
+  }
+
+  return trimmed.slice(0, lastSlashIndex);
+}
+
+function isValidNodeName(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (trimmed === "." || trimmed === "..") {
+    return false;
+  }
+
+  return !/[\\/]/.test(trimmed);
 }
 
 type TreeIconTone =
@@ -837,6 +983,10 @@ function App() {
     readStoredFileIconThemeId(),
   );
   const [activeHeaderMenuId, setActiveHeaderMenuId] = useState<HeaderMenuId | null>(null);
+  const [selectedTreePath, setSelectedTreePath] = useState<string | null>(null);
+  const [selectedTreeKind, setSelectedTreeKind] = useState<FileKind | null>(null);
+  const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
+  const [treeDropTargetPath, setTreeDropTargetPath] = useState<string | null>(null);
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const activeColorTheme = useMemo(
@@ -851,9 +1001,12 @@ function App() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const treeContextMenuRef = useRef<HTMLDivElement | null>(null);
   const workbenchGridRef = useRef<HTMLDivElement | null>(null);
   const explorerResizePointerIdRef = useRef<number | null>(null);
   const explorerLastVisibleWidthRef = useRef(EXPLORER_DEFAULT_WIDTH);
+  const treeDragSourceRef = useRef<TreeDragSource | null>(null);
+  const treeDropRejectionSignatureRef = useRef<string | null>(null);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -941,6 +1094,41 @@ function App() {
   }, [activeHeaderMenuId]);
 
   useEffect(() => {
+    if (!treeContextMenu) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (treeContextMenuRef.current?.contains(target)) {
+        return;
+      }
+
+      setTreeContextMenu(null);
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      setTreeContextMenu(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [treeContextMenu]);
+
+  useEffect(() => {
     if (!isExplorerResizing) {
       document.body.classList.remove("explorer-resizing");
       return;
@@ -959,6 +1147,29 @@ function App() {
 
   const isFileTabActive = activeWorkbenchTabKind === "file";
   const activeFileTab = isFileTabActive ? activeTab : null;
+  const activeTerminal = useMemo(
+    () => terminals.find((session) => session.id === activeTerminalId) ?? null,
+    [terminals, activeTerminalId],
+  );
+  const contextPath = useMemo(() => {
+    if (isFileTabActive && activeTab) {
+      return activeTab.path;
+    }
+
+    if (activeWorkbenchTabKind === "terminal") {
+      return activeTerminal?.cwd ?? workspace?.rootPath ?? null;
+    }
+
+    return selectedTreePath ?? workspace?.rootPath ?? null;
+  }, [
+    isFileTabActive,
+    activeTab,
+    activeWorkbenchTabKind,
+    activeTerminal?.cwd,
+    selectedTreePath,
+    workspace?.rootPath,
+  ]);
+  const activeTabDirty = activeTab ? tabIsDirty(activeTab) : false;
 
   const hasDirtyTabs = useMemo(
     () => tabs.some((tab) => tab.content !== tab.savedContent),
@@ -1106,6 +1317,532 @@ function App() {
     } finally {
       setDirectoryLoading(path, false);
     }
+  }
+
+  function closeTreeContextMenu(): void {
+    setTreeContextMenu(null);
+  }
+
+  function refreshDirectoryEntries(paths: string[]): void {
+    const uniquePaths = Array.from(new Set(paths.filter((value) => value.length > 0)));
+    for (const path of uniquePaths) {
+      setExpandedByPath((previous) => ({
+        ...previous,
+        [path]: true,
+      }));
+      void loadDirectory(path);
+    }
+  }
+
+  function resolveCreationDirectoryPath(
+    preferredPath?: string,
+    preferredKind?: FileKind,
+  ): string | null {
+    if (!workspace) {
+      return null;
+    }
+
+    const path = preferredPath ?? selectedTreePath;
+    const kind = preferredKind ?? selectedTreeKind;
+
+    if (!path || !kind) {
+      return workspace.rootPath;
+    }
+
+    if (kind === "directory") {
+      return path;
+    }
+
+    return parentPath(path) ?? workspace.rootPath;
+  }
+
+  function remapPathInExplorerState(previousPath: string, nextPath: string): void {
+    setTreeByPath((previous) => {
+      const next: Record<string, FileNode[]> = {};
+
+      for (const [key, nodes] of Object.entries(previous)) {
+        const mappedKey = replacePathPrefix(key, previousPath, nextPath);
+        next[mappedKey] = nodes.map((node) => {
+          if (!isSameOrDescendantPath(node.path, previousPath)) {
+            return node;
+          }
+
+          return {
+            ...node,
+            path: replacePathPrefix(node.path, previousPath, nextPath),
+          };
+        });
+      }
+
+      return next;
+    });
+
+    setExpandedByPath((previous) => {
+      const next: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(previous)) {
+        next[replacePathPrefix(key, previousPath, nextPath)] = value;
+      }
+      return next;
+    });
+
+    setLoadingByPath((previous) => {
+      const next: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(previous)) {
+        next[replacePathPrefix(key, previousPath, nextPath)] = value;
+      }
+      return next;
+    });
+
+    setOpeningFilesByPath((previous) => {
+      const next: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(previous)) {
+        next[replacePathPrefix(key, previousPath, nextPath)] = value;
+      }
+      return next;
+    });
+
+    setSelectedTreePath((previous) => {
+      if (!previous || !isSameOrDescendantPath(previous, previousPath)) {
+        return previous;
+      }
+      return replacePathPrefix(previous, previousPath, nextPath);
+    });
+
+    setTreeDropTargetPath((previous) => {
+      if (!previous || !isSameOrDescendantPath(previous, previousPath)) {
+        return previous;
+      }
+      return replacePathPrefix(previous, previousPath, nextPath);
+    });
+
+    setTreeContextMenu((previous) => {
+      if (!previous || !isSameOrDescendantPath(previous.path, previousPath)) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        path: replacePathPrefix(previous.path, previousPath, nextPath),
+      };
+    });
+  }
+
+  function remapPathInTabs(previousPath: string, nextPath: string): void {
+    setTabs((previous) =>
+      previous.map((tab) => {
+        if (!isSameOrDescendantPath(tab.path, previousPath)) {
+          return tab;
+        }
+
+        const mappedPath = replacePathPrefix(tab.path, previousPath, nextPath);
+        return {
+          ...tab,
+          id: mappedPath,
+          path: mappedPath,
+          title: fileNameFromPath(mappedPath),
+          language: detectLanguage(mappedPath),
+        };
+      }),
+    );
+
+    if (activeTabId && isSameOrDescendantPath(activeTabId, previousPath)) {
+      setActiveTabId(replacePathPrefix(activeTabId, previousPath, nextPath));
+    }
+
+    const nextRequests: Record<string, Promise<string | null>> = {};
+    for (const [key, request] of Object.entries(openFileRequestsRef.current)) {
+      nextRequests[replacePathPrefix(key, previousPath, nextPath)] = request;
+    }
+    openFileRequestsRef.current = nextRequests;
+  }
+
+  function removePathFromExplorerState(path: string): void {
+    setTreeByPath((previous) => {
+      const next: Record<string, FileNode[]> = {};
+
+      for (const [key, nodes] of Object.entries(previous)) {
+        if (isSameOrDescendantPath(key, path)) {
+          continue;
+        }
+
+        next[key] = nodes.filter((node) => !isSameOrDescendantPath(node.path, path));
+      }
+
+      return next;
+    });
+
+    setExpandedByPath((previous) => {
+      const next: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(previous)) {
+        if (!isSameOrDescendantPath(key, path)) {
+          next[key] = value;
+        }
+      }
+      return next;
+    });
+
+    setLoadingByPath((previous) => {
+      const next: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(previous)) {
+        if (!isSameOrDescendantPath(key, path)) {
+          next[key] = value;
+        }
+      }
+      return next;
+    });
+
+    setOpeningFilesByPath((previous) => {
+      const next: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(previous)) {
+        if (!isSameOrDescendantPath(key, path)) {
+          next[key] = value;
+        }
+      }
+      return next;
+    });
+
+    if (selectedTreePath && isSameOrDescendantPath(selectedTreePath, path)) {
+      setSelectedTreePath(null);
+      setSelectedTreeKind(null);
+    }
+
+    setTreeDropTargetPath((previous) =>
+      previous && isSameOrDescendantPath(previous, path) ? null : previous,
+    );
+
+    setTreeContextMenu((previous) =>
+      previous && isSameOrDescendantPath(previous.path, path) ? null : previous,
+    );
+  }
+
+  function removeTabsByPath(path: string): void {
+    const existingTabs = tabsRef.current;
+    const tabsToRemove = existingTabs.filter((tab) => isSameOrDescendantPath(tab.path, path));
+    if (tabsToRemove.length === 0) {
+      return;
+    }
+
+    const nextTabs = existingTabs.filter((tab) => !isSameOrDescendantPath(tab.path, path));
+    setTabs(nextTabs);
+
+    if (!activeTabId || !isSameOrDescendantPath(activeTabId, path)) {
+      return;
+    }
+
+    const activeIndex = existingTabs.findIndex((tab) => tab.id === activeTabId);
+    const fallbackIndex = Math.max(0, activeIndex - 1);
+    const fallbackTab = nextTabs[fallbackIndex] ?? nextTabs[nextTabs.length - 1] ?? null;
+    setActiveTabId(fallbackTab ? fallbackTab.id : null);
+  }
+
+  async function promptCreateNode(
+    kind: FileKind,
+    preferredPath?: string,
+    preferredKind?: FileKind,
+  ): Promise<void> {
+    const targetDirectoryPath = resolveCreationDirectoryPath(preferredPath, preferredKind);
+    if (!targetDirectoryPath) {
+      setStatusMessage("No workspace selected.");
+      return;
+    }
+
+    const promptLabel = kind === "file" ? "文件" : "文件夹";
+    const input = window.prompt(`请输入${promptLabel}名称`);
+    if (input === null) {
+      return;
+    }
+
+    const name = input.trim();
+    if (!isValidNodeName(name)) {
+      setStatusMessage("名称无效：不能为空，且不能包含路径分隔符。");
+      return;
+    }
+
+    const targetPath = joinPath(targetDirectoryPath, name);
+
+    try {
+      const result = kind === "file"
+        ? await createFile(targetPath)
+        : await createDirectory(targetPath);
+
+      refreshDirectoryEntries([targetDirectoryPath]);
+
+      if (kind === "file") {
+        setSelectedTreePath(result.path);
+        setSelectedTreeKind("file");
+        await openFile(result.path);
+      } else {
+        setExpandedByPath((previous) => ({
+          ...previous,
+          [result.path]: true,
+        }));
+        setSelectedTreePath(result.path);
+        setSelectedTreeKind("directory");
+      }
+
+      setStatusMessage(`Created ${promptLabel}: ${fileNameFromPath(result.path)}`);
+    } catch (error) {
+      setStatusMessage(`Failed to create ${promptLabel}: ${String(error)}`);
+    }
+  }
+
+  async function handleRenameTreePath(path: string, kind: FileKind): Promise<void> {
+    if (workspace && isSamePath(path, workspace.rootPath)) {
+      setStatusMessage("Workspace root cannot be renamed.");
+      return;
+    }
+
+    const currentName = fileNameFromPath(path);
+    const input = window.prompt("请输入新名称", currentName);
+    if (input === null) {
+      return;
+    }
+
+    const nextName = input.trim();
+    if (!isValidNodeName(nextName)) {
+      setStatusMessage("名称无效：不能为空，且不能包含路径分隔符。");
+      return;
+    }
+
+    if (nextName === currentName) {
+      return;
+    }
+
+    try {
+      const result = await renamePath(path, nextName);
+      remapPathInExplorerState(path, result.path);
+      remapPathInTabs(path, result.path);
+
+      const sourceParentPath = parentPath(path);
+      const targetParentPath = parentPath(result.path);
+      refreshDirectoryEntries([sourceParentPath ?? "", targetParentPath ?? ""]);
+
+      setSelectedTreePath(result.path);
+      setSelectedTreeKind(kind);
+      setStatusMessage(`Renamed to ${fileNameFromPath(result.path)}`);
+    } catch (error) {
+      setStatusMessage(`Rename failed: ${String(error)}`);
+    }
+  }
+
+  async function handleDeleteTreePath(path: string, kind: FileKind): Promise<void> {
+    if (workspace && isSamePath(path, workspace.rootPath)) {
+      setStatusMessage("Workspace root cannot be deleted.");
+      return;
+    }
+
+    const label = kind === "directory" ? "文件夹" : "文件";
+    const confirmed = window.confirm(`确认永久删除${label}“${fileNameFromPath(path)}”？此操作不可撤销。`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await deletePath(path);
+      removePathFromExplorerState(path);
+      removeTabsByPath(path);
+
+      const parentDirectoryPath = parentPath(path);
+      refreshDirectoryEntries([parentDirectoryPath ?? ""]);
+      setStatusMessage(`Deleted ${label}: ${fileNameFromPath(path)}`);
+    } catch (error) {
+      setStatusMessage(`Delete failed: ${String(error)}`);
+    }
+  }
+
+  function resolveTreeDragSource(event: ReactDragEvent<HTMLElement>): TreeDragSource | null {
+    const fromRef = treeDragSourceRef.current;
+    if (fromRef) {
+      return fromRef;
+    }
+
+    const payloadSource = parseTreeDragSourcePayload(event.dataTransfer.getData(TREE_DRAG_SOURCE_MIME));
+    if (payloadSource) {
+      treeDragSourceRef.current = payloadSource;
+      return payloadSource;
+    }
+
+    const fallbackPath = event.dataTransfer.getData("text/plain").trim();
+    if (!fallbackPath) {
+      return null;
+    }
+
+    const fallbackKind = selectedTreePath && isSamePath(selectedTreePath, fallbackPath)
+      ? selectedTreeKind
+      : null;
+    if (fallbackKind !== "file" && fallbackKind !== "directory") {
+      return null;
+    }
+
+    const fallbackSource: TreeDragSource = {
+      path: fallbackPath,
+      kind: fallbackKind,
+    };
+    treeDragSourceRef.current = fallbackSource;
+    return fallbackSource;
+  }
+
+  function getTreeDropRejectionReason(
+    source: TreeDragSource | null,
+    targetDirectoryPath: string,
+  ): TreeDropRejectionReason | null {
+    if (!source) {
+      return "missing-source";
+    }
+
+    if (isSamePath(source.path, targetDirectoryPath)) {
+      return "same-path";
+    }
+
+    const sourceParentPath = parentPath(source.path);
+    if (sourceParentPath && isSamePath(sourceParentPath, targetDirectoryPath)) {
+      return "same-parent";
+    }
+
+    if (source.kind === "directory" && isSameOrDescendantPath(targetDirectoryPath, source.path)) {
+      return "target-inside-source";
+    }
+
+    return null;
+  }
+
+  function reportTreeDropRejection(
+    reason: TreeDropRejectionReason,
+    source: TreeDragSource | null,
+    targetDirectoryPath: string,
+  ): void {
+    const sourcePath = source?.path ?? "<none>";
+    const signature = `${reason}:${sourcePath}->${targetDirectoryPath}`;
+    if (treeDropRejectionSignatureRef.current === signature) {
+      return;
+    }
+
+    treeDropRejectionSignatureRef.current = signature;
+    console.debug("[tree-dnd] drop rejected", {
+      reason,
+      sourcePath: source?.path ?? null,
+      sourceKind: source?.kind ?? null,
+      targetDirectoryPath,
+    });
+  }
+
+  function clearTreeDropRejectionTrace(): void {
+    treeDropRejectionSignatureRef.current = null;
+  }
+
+  function canDropTreePath(source: TreeDragSource | null, targetDirectoryPath: string): boolean {
+    return getTreeDropRejectionReason(source, targetDirectoryPath) === null;
+  }
+
+  async function handleMoveTreePath(source: TreeDragSource, targetDirectoryPath: string): Promise<void> {
+    if (!canDropTreePath(source, targetDirectoryPath)) {
+      return;
+    }
+
+    try {
+      const result = await movePath(source.path, targetDirectoryPath);
+      remapPathInExplorerState(source.path, result.path);
+      remapPathInTabs(source.path, result.path);
+
+      const sourceParentPath = parentPath(source.path);
+      const targetParentPath = parentPath(result.path);
+      refreshDirectoryEntries([sourceParentPath ?? "", targetDirectoryPath, targetParentPath ?? ""]);
+
+      setSelectedTreePath(result.path);
+      setSelectedTreeKind(source.kind);
+      setStatusMessage(`Moved: ${fileNameFromPath(source.path)} -> ${targetDirectoryPath}`);
+    } catch (error) {
+      setStatusMessage(`Move failed: ${String(error)}`);
+    }
+  }
+
+  function handleTreeDragStart(event: ReactDragEvent<HTMLElement>, node: TreeDragSource): void {
+    treeDragSourceRef.current = node;
+    clearTreeDropRejectionTrace();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(TREE_DRAG_SOURCE_MIME, JSON.stringify(node));
+    event.dataTransfer.setData("text/plain", node.path);
+    setSelectedTreePath(node.path);
+    setSelectedTreeKind(node.kind);
+    closeTreeContextMenu();
+  }
+
+  function handleTreeDragEnd(): void {
+    treeDragSourceRef.current = null;
+    clearTreeDropRejectionTrace();
+    setTreeDropTargetPath(null);
+  }
+
+  function handleTreeDragOver(event: ReactDragEvent<HTMLElement>, targetDirectoryPath: string): void {
+    const source = resolveTreeDragSource(event);
+    const rejectionReason = getTreeDropRejectionReason(source, targetDirectoryPath);
+    if (rejectionReason) {
+      reportTreeDropRejection(rejectionReason, source, targetDirectoryPath);
+      if (treeDropTargetPath) {
+        setTreeDropTargetPath(null);
+      }
+      return;
+    }
+
+    clearTreeDropRejectionTrace();
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+
+    if (!treeDropTargetPath || !isSamePath(treeDropTargetPath, targetDirectoryPath)) {
+      setTreeDropTargetPath(targetDirectoryPath);
+    }
+  }
+
+  function handleTreeDragLeave(event: ReactDragEvent<HTMLElement>, targetDirectoryPath: string): void {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+      return;
+    }
+
+    if (!treeDropTargetPath || !isSamePath(treeDropTargetPath, targetDirectoryPath)) {
+      return;
+    }
+
+    setTreeDropTargetPath(null);
+  }
+
+  function handleTreeDrop(event: ReactDragEvent<HTMLElement>, targetDirectoryPath: string): void {
+    event.preventDefault();
+
+    const source = resolveTreeDragSource(event);
+    const rejectionReason = getTreeDropRejectionReason(source, targetDirectoryPath);
+
+    treeDragSourceRef.current = null;
+    clearTreeDropRejectionTrace();
+    setTreeDropTargetPath(null);
+
+    if (rejectionReason || !source) {
+      reportTreeDropRejection(rejectionReason ?? "missing-source", source, targetDirectoryPath);
+      return;
+    }
+
+    void handleMoveTreePath(source, targetDirectoryPath);
+  }
+
+  function openTreeContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    path: string,
+    kind: FileKind,
+  ): void {
+    event.preventDefault();
+    setSelectedTreePath(path);
+    setSelectedTreeKind(kind);
+    setTreeContextMenu({
+      path,
+      kind,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function runTreeContextAction(action: () => void | Promise<void>): void {
+    closeTreeContextMenu();
+    void action();
   }
 
   const redrawTerminal = useCallback((sessionId: string | null): void => {
@@ -1341,6 +2078,12 @@ function App() {
 
       setTreeByPath({});
       setExpandedByPath({ [info.rootPath]: true });
+      setSelectedTreePath(info.rootPath);
+      setSelectedTreeKind("directory");
+      setTreeContextMenu(null);
+      setTreeDropTargetPath(null);
+      treeDragSourceRef.current = null;
+      clearTreeDropRejectionTrace();
       await loadDirectory(info.rootPath);
 
       const existingSessions = await terminalList();
@@ -1760,6 +2503,8 @@ function App() {
       const expanded = Boolean(expandedByPath[node.path]);
       const loading = Boolean(loadingByPath[node.path]);
       const openingFile = !isDirectory && Boolean(openingFilesByPath[node.path]);
+      const selected = selectedTreePath ? isSamePath(selectedTreePath, node.path) : false;
+      const isDropTarget = isDirectory && treeDropTargetPath ? isSamePath(treeDropTargetPath, node.path) : false;
       const visual = isDirectory
         ? resolveDirectoryVisual(node.name, expanded, activeFileIconThemeId)
         : resolveFileVisual(node.name, activeFileIconThemeId);
@@ -1768,10 +2513,23 @@ function App() {
         <div key={node.path}>
           <button
             type="button"
-            className={`tree-item ${activeTab?.path === node.path ? "active" : ""}`}
+            className={`tree-item ${activeTab?.path === node.path ? "active" : ""} ${
+              selected ? "selected" : ""
+            } ${isDropTarget ? "drop-target" : ""}`}
             style={{ paddingLeft: `${6 + depth * 11}px` }}
             disabled={loading || openingFile}
+            draggable={!loading && !openingFile}
+            onContextMenu={(event) => openTreeContextMenu(event, node.path, node.kind)}
+            onDragStart={(event) => handleTreeDragStart(event, { path: node.path, kind: node.kind })}
+            onDragEnd={handleTreeDragEnd}
+            onDragOver={isDirectory ? (event) => handleTreeDragOver(event, node.path) : undefined}
+            onDragLeave={isDirectory ? (event) => handleTreeDragLeave(event, node.path) : undefined}
+            onDrop={isDirectory ? (event) => handleTreeDrop(event, node.path) : undefined}
             onClick={() => {
+              setSelectedTreePath(node.path);
+              setSelectedTreeKind(node.kind);
+              closeTreeContextMenu();
+
               if (isDirectory) {
                 const nextExpanded = !expanded;
                 setExpandedByPath((previous) => ({
@@ -2071,15 +2829,28 @@ function App() {
     [explorerWidth],
   );
   const rootExpanded = workspace ? Boolean(expandedByPath[workspace.rootPath]) : false;
+  const rootSelected = workspace && selectedTreePath
+    ? isSamePath(selectedTreePath, workspace.rootPath)
+    : false;
+  const rootDropTarget = workspace && treeDropTargetPath
+    ? isSamePath(treeDropTargetPath, workspace.rootPath)
+    : false;
   const rootVisual = workspace
     ? resolveDirectoryVisual(workspace.rootName, rootExpanded, activeFileIconThemeId, true)
     : null;
+  const contextMenuOnRoot = workspace && treeContextMenu
+    ? isSamePath(treeContextMenu.path, workspace.rootPath)
+    : false;
 
   return (
     <div className="app-shell">
       <header className="window-bar" data-tauri-drag-region>
         <div className="window-drag" data-tauri-drag-region>
           <img className="brand-icon" src="/icon.png" alt="VEXC" draggable={false} />
+          <div className="brand-meta" aria-hidden="true">
+            <span className="brand-title">VEXC</span>
+            <span className="brand-subtitle">{workspace?.rootName ?? "未打开工作区"}</span>
+          </div>
         </div>
 
         <div
@@ -2097,11 +2868,13 @@ function App() {
             <button
               type="button"
               className="menu-tab"
+              title="文件"
+              aria-label="文件"
               aria-haspopup="menu"
               aria-expanded={activeHeaderMenuId === "file"}
               onClick={() => toggleHeaderMenu("file")}
             >
-              文件
+              <File size={14} aria-hidden="true" />
             </button>
             {activeHeaderMenuId === "file" ? (
               <div className="menu-panel" role="menu" aria-label="文件菜单">
@@ -2148,11 +2921,13 @@ function App() {
             <button
               type="button"
               className="menu-tab"
+              title="视图"
+              aria-label="视图"
               aria-haspopup="menu"
               aria-expanded={activeHeaderMenuId === "view"}
               onClick={() => toggleHeaderMenu("view")}
             >
-              视图
+              <FolderSearch size={14} aria-hidden="true" />
             </button>
             {activeHeaderMenuId === "view" ? (
               <div className="menu-panel" role="menu" aria-label="视图菜单">
@@ -2178,11 +2953,13 @@ function App() {
             <button
               type="button"
               className="menu-tab"
+              title="主题"
+              aria-label="主题"
               aria-haspopup="menu"
               aria-expanded={activeHeaderMenuId === "theme"}
               onClick={() => toggleHeaderMenu("theme")}
             >
-              主题
+              <FileCog size={14} aria-hidden="true" />
             </button>
             {activeHeaderMenuId === "theme" ? (
               <div className="menu-panel menu-panel-theme" role="menu" aria-label="主题菜单">
@@ -2263,12 +3040,45 @@ function App() {
 
       <div ref={workbenchGridRef} className={workbenchClassName} style={workbenchStyle}>
         <aside className="explorer-panel">
+          <div className="explorer-toolbar">
+            <button
+              type="button"
+              className="explorer-action icon-only"
+              title="新建文件"
+              aria-label="新建文件"
+              disabled={!workspace}
+              onClick={() => void promptCreateNode("file")}
+            >
+              <FilePlus2 size={14} />
+            </button>
+            <button
+              type="button"
+              className="explorer-action icon-only"
+              title="新建文件夹"
+              aria-label="新建文件夹"
+              disabled={!workspace}
+              onClick={() => void promptCreateNode("directory")}
+            >
+              <FolderPlus size={14} />
+            </button>
+          </div>
+
           {workspace ? (
             <div className="explorer-root">
               <button
                 type="button"
-                className="tree-item root"
+                className={`tree-item root ${rootSelected ? "selected" : ""} ${
+                  rootDropTarget ? "drop-target" : ""
+                }`}
+                onContextMenu={(event) => openTreeContextMenu(event, workspace.rootPath, "directory")}
+                onDragOver={(event) => handleTreeDragOver(event, workspace.rootPath)}
+                onDragLeave={(event) => handleTreeDragLeave(event, workspace.rootPath)}
+                onDrop={(event) => handleTreeDrop(event, workspace.rootPath)}
                 onClick={() => {
+                  setSelectedTreePath(workspace.rootPath);
+                  setSelectedTreeKind("directory");
+                  closeTreeContextMenu();
+
                   const expanded = !rootExpanded;
                   setExpandedByPath((previous) => ({
                     ...previous,
@@ -2291,6 +3101,71 @@ function App() {
           ) : (
             <p className="empty-text">Open a workspace to browse files.</p>
           )}
+
+          {treeContextMenu ? (
+            <div
+              ref={treeContextMenuRef}
+              className="tree-context-menu"
+              role="menu"
+              style={{ top: `${treeContextMenu.y}px`, left: `${treeContextMenu.x}px` }}
+            >
+              {treeContextMenu.kind === "directory" ? (
+                <>
+                  <button
+                    type="button"
+                    className="tree-context-item"
+                    role="menuitem"
+                    onClick={() =>
+                      runTreeContextAction(() =>
+                        promptCreateNode("file", treeContextMenu.path, treeContextMenu.kind),
+                      )}
+                  >
+                    <FilePlus2 size={14} />
+                    <span>新建文件</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="tree-context-item"
+                    role="menuitem"
+                    onClick={() =>
+                      runTreeContextAction(() =>
+                        promptCreateNode("directory", treeContextMenu.path, treeContextMenu.kind),
+                      )}
+                  >
+                    <FolderPlus size={14} />
+                    <span>新建文件夹</span>
+                  </button>
+                  {!contextMenuOnRoot ? <div className="tree-context-separator" /> : null}
+                </>
+              ) : null}
+
+              {!contextMenuOnRoot ? (
+                <button
+                  type="button"
+                  className="tree-context-item"
+                  role="menuitem"
+                  onClick={() =>
+                    runTreeContextAction(() => handleRenameTreePath(treeContextMenu.path, treeContextMenu.kind))}
+                >
+                  <Pencil size={14} />
+                  <span>重命名</span>
+                </button>
+              ) : null}
+
+              {!contextMenuOnRoot ? (
+                <button
+                  type="button"
+                  className="tree-context-item danger"
+                  role="menuitem"
+                  onClick={() =>
+                    runTreeContextAction(() => handleDeleteTreePath(treeContextMenu.path, treeContextMenu.kind))}
+                >
+                  <Trash2 size={14} />
+                  <span>删除</span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </aside>
 
         <div
@@ -2361,7 +3236,7 @@ function App() {
                   aria-label="新建终端"
                   onClick={() => void createTerminalSession()}
                 >
-                  +
+                  <FileTerminal size={13} aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -2408,16 +3283,55 @@ function App() {
 
       <footer className="statusbar">
         <div className="statusbar-section statusbar-left">
-          <span className="statusbar-icon">ℹ️</span>
+          <span className="statusbar-icon" aria-hidden="true">
+            <Info size={13} />
+          </span>
           <span>{statusMessage || "Ready"}</span>
         </div>
 
         <div className="statusbar-section statusbar-center">
-          <span className="statusbar-path">{workspace?.rootPath || "No workspace"}</span>
+          <span className="statusbar-path">{contextPath || workspace?.rootPath || "No workspace"}</span>
         </div>
 
         <div className="statusbar-section statusbar-right">
-          {/* 预留空间，可显示编码、语言、行列等信息 */}
+          <span
+            className="statusbar-chip"
+            title={activeWorkbenchTabKind === "terminal" ? "终端模式" : "编辑模式"}
+            aria-label={activeWorkbenchTabKind === "terminal" ? "终端模式" : "编辑模式"}
+          >
+            {activeWorkbenchTabKind === "terminal" ? (
+              <FileTerminal size={12} aria-hidden="true" />
+            ) : (
+              <FileCode size={12} aria-hidden="true" />
+            )}
+          </span>
+          {activeTab ? (
+            <span className="statusbar-chip" title={activeTab.language} aria-label={activeTab.language}>
+              <File size={12} aria-hidden="true" />
+            </span>
+          ) : null}
+          {activeTab ? (
+            <span
+              className={`statusbar-chip ${activeTabDirty ? "warning" : ""}`}
+              title={activeTabDirty ? "未保存" : "已保存"}
+              aria-label={activeTabDirty ? "未保存" : "已保存"}
+            >
+              {activeTabDirty ? (
+                <FilePenLine size={12} aria-hidden="true" />
+              ) : (
+                <Save size={12} aria-hidden="true" />
+              )}
+            </span>
+          ) : null}
+          {activeWorkbenchTabKind === "terminal" && activeTerminal ? (
+            <span
+              className={`statusbar-chip ${activeTerminal.status === "running" ? "" : "warning"}`}
+              title={activeTerminal.status === "running" ? "终端运行中" : "终端已停止"}
+              aria-label={activeTerminal.status === "running" ? "终端运行中" : "终端已停止"}
+            >
+              <FileTerminal size={12} aria-hidden="true" />
+            </span>
+          ) : null}
         </div>
       </footer>
     </div>

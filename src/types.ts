@@ -22,6 +22,10 @@ export interface SaveResult {
   bytesWritten: number;
 }
 
+export interface PathResult {
+  path: string;
+}
+
 export interface SearchHit {
   path: string;
   line: number;

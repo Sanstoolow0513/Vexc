@@ -72,6 +72,12 @@ struct SaveResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PathResult {
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchHit {
     path: String,
     line: usize,
@@ -305,6 +311,150 @@ fn write_file(
     Ok(SaveResult {
         path: file_path.to_string_lossy().to_string(),
         bytes_written: content.len(),
+    })
+}
+
+#[tauri::command]
+fn create_file(path: String, state: tauri::State<AppState>) -> Result<PathResult, String> {
+    let root = get_workspace_root(&state)?;
+    let file_path = resolve_write_workspace_path(&path, &root)?;
+
+    if file_path.exists() {
+        return Err(String::from("Target path already exists"));
+    }
+
+    fs::write(&file_path, []).map_err(|error| format!("Failed to create file: {error}"))?;
+
+    let canonical = canonicalize_path(&file_path, "Failed to resolve created file path")?;
+    Ok(PathResult {
+        path: canonical.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn create_directory(path: String, state: tauri::State<AppState>) -> Result<PathResult, String> {
+    let root = get_workspace_root(&state)?;
+    let directory_path = resolve_write_workspace_path(&path, &root)?;
+
+    if directory_path.exists() {
+        return Err(String::from("Target path already exists"));
+    }
+
+    fs::create_dir(&directory_path)
+        .map_err(|error| format!("Failed to create directory: {error}"))?;
+
+    let canonical = canonicalize_path(&directory_path, "Failed to resolve created directory path")?;
+    Ok(PathResult {
+        path: canonical.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn rename_path(
+    path: String,
+    new_name: String,
+    state: tauri::State<AppState>,
+) -> Result<PathResult, String> {
+    let root = get_workspace_root(&state)?;
+    let source_path = resolve_existing_workspace_path(&path, &root)?;
+
+    if source_path == root {
+        return Err(String::from("Cannot rename workspace root directory"));
+    }
+
+    let trimmed_name = validate_path_segment_name(&new_name)?;
+    let parent_directory = source_path
+        .parent()
+        .ok_or_else(|| String::from("Source path has no parent directory"))?;
+    let target_path = parent_directory.join(trimmed_name);
+
+    if target_path == source_path {
+        return Ok(PathResult {
+            path: source_path.to_string_lossy().to_string(),
+        });
+    }
+
+    if target_path.exists() {
+        return Err(String::from("Target path already exists"));
+    }
+
+    fs::rename(&source_path, &target_path)
+        .map_err(|error| format!("Failed to rename path: {error}"))?;
+
+    let canonical = canonicalize_path(&target_path, "Failed to resolve renamed path")?;
+    Ok(PathResult {
+        path: canonical.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn delete_path(path: String, state: tauri::State<AppState>) -> Result<Ack, String> {
+    let root = get_workspace_root(&state)?;
+    let target_path = resolve_existing_workspace_path(&path, &root)?;
+
+    if target_path == root {
+        return Err(String::from("Cannot delete workspace root directory"));
+    }
+
+    let metadata = fs::metadata(&target_path)
+        .map_err(|error| format!("Failed to inspect target path: {error}"))?;
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(&target_path)
+            .map_err(|error| format!("Failed to delete directory: {error}"))?;
+    } else if metadata.is_file() {
+        fs::remove_file(&target_path).map_err(|error| format!("Failed to delete file: {error}"))?;
+    } else {
+        return Err(String::from("Unsupported file system entry type"));
+    }
+
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn move_path(
+    source_path: String,
+    target_directory_path: String,
+    state: tauri::State<AppState>,
+) -> Result<PathResult, String> {
+    let root = get_workspace_root(&state)?;
+    let source = resolve_existing_workspace_path(&source_path, &root)?;
+    let target_directory = resolve_existing_workspace_path(&target_directory_path, &root)?;
+
+    if source == root {
+        return Err(String::from("Cannot move workspace root directory"));
+    }
+
+    if !target_directory.is_dir() {
+        return Err(String::from("Move target must be a directory"));
+    }
+
+    let source_name = source
+        .file_name()
+        .ok_or_else(|| String::from("Source path is missing file name"))?;
+    let target_path = target_directory.join(source_name);
+
+    if target_path == source {
+        return Ok(PathResult {
+            path: source.to_string_lossy().to_string(),
+        });
+    }
+
+    if target_path.exists() {
+        return Err(String::from("Target path already exists"));
+    }
+
+    let source_metadata =
+        fs::metadata(&source).map_err(|error| format!("Failed to inspect source path: {error}"))?;
+    if source_metadata.is_dir() && target_directory.starts_with(&source) {
+        return Err(String::from("Cannot move a directory into itself"));
+    }
+
+    fs::rename(&source, &target_path).map_err(|error| format!("Failed to move path: {error}"))?;
+
+    let canonical = canonicalize_path(&target_path, "Failed to resolve moved path")?;
+    Ok(PathResult {
+        path: canonical.to_string_lossy().to_string(),
     })
 }
 
@@ -994,6 +1144,23 @@ fn resolve_write_workspace_path(path: &str, root: &Path) -> Result<PathBuf, Stri
     Ok(canonical_parent.join(file_name))
 }
 
+fn validate_path_segment_name(value: &str) -> Result<&str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("Name cannot be empty"));
+    }
+
+    if trimmed == "." || trimmed == ".." {
+        return Err(String::from("Name is not valid"));
+    }
+
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(String::from("Name cannot contain path separators"));
+    }
+
+    Ok(trimmed)
+}
+
 fn ensure_inside_workspace(candidate: &Path, workspace_root: &Path) -> Result<(), String> {
     if candidate.starts_with(workspace_root) {
         Ok(())
@@ -1048,6 +1215,11 @@ pub fn run() {
             list_directory,
             read_file,
             write_file,
+            create_file,
+            create_directory,
+            rename_path,
+            delete_path,
+            move_path,
             search_workspace,
             terminal_create,
             terminal_list,

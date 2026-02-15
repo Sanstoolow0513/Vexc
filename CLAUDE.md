@@ -96,8 +96,9 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 **Tauri Commands** (invoked from frontend):
 - `set_workspace`, `get_workspace` - Workspace management
 - `list_directory`, `read_file`, `write_file` - File operations
+- `create_file`, `create_directory`, `rename_path`, `delete_path`, `move_path` - File/directory management
 - `search_workspace` - Recursive text search (max 200 hits default)
-- `terminal_create`, `terminal_list`, `terminal_snapshot`, `terminal_write`, `terminal_close` - Terminal session management
+- `terminal_create`, `terminal_list`, `terminal_snapshot`, `terminal_write`, `terminal_resize`, `terminal_clear`, `terminal_close` - Terminal session management
 - `ai_provider_suggestions`, `ai_run` - AI CLI integration
 
 **Data Flow**:
@@ -135,11 +136,12 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 - Core variables: `--bg-canvas-top`, `--surface-0/1/2`, `--accent`, `--text`, etc.
 - Theme variables defined in `:root` selector in `App.css`
 - Consistent theming across UI components via CSS variable references
+- Color-coded file tree icons with semantic tones (code, data, doc, media, archive, script, secure)
 
 **Key UI Patterns**:
 - Lazy-loaded directory tree (fetches children on expand)
 - Tab-based editing with dirty state tracking (`content !== savedContent`)
-- Virtual terminal sessions (line-based, not PTY)
+- Terminal sessions using portable-pty for cross-platform PTY support
 - **Monaco Editor Theming**: Custom One Dark Pro theme defined in `handleEditorMount`:
   - Token colors: keywords (#c678dd), strings (#98c379), functions (#61afef), etc.
   - Custom background (#0a0c10) and selection colors
@@ -219,6 +221,36 @@ When contributing changes:
 4. **Testing**: Manual testing in dev mode (no automated tests yet - M3 milestone)
 5. **Vite ignored paths**: `src-tauri/` is excluded from Vite's watch to prevent interference with Rust builds
 
+### Adding New Tauri Commands
+
+1. **Backend**: Define function in `src-tauri/src/lib.rs` with `#[tauri::command]` attribute
+2. **State Access**: Add `state: tauri::State<AppState>` parameter if needed
+3. **Return Type**: Use `Result<T, String>` for error handling (error message as `String`)
+4. **Register**: Add command name to `invoke_handler!` macro in `run()` function
+5. **Frontend API**: Add wrapper function in `src/api.ts` using `invoke<T>("command_name", { args })`
+6. **Types**: Add TypeScript types to `src/types.ts` matching Rust structs
+7. **Serialization**: Use `#[serde(rename_all = "camelCase")]` on Rust structs for TypeScript compatibility
+
+### Debugging Tips
+
+**Frontend Issues**:
+- Browser DevTools: Press F12 during `pnpm tauri dev` to open DevTools
+- Console logs: Use `console.log()` for debugging; check browser console
+- React DevTools: Install browser extension for component inspection
+- Network tab: Monitor Tauri command invocation and response times
+
+**Backend Issues**:
+- Rust errors: Check terminal where `pnpm tauri dev` is running
+- Logging: Use `eprintln!()` for debug output to terminal
+- Command errors: All errors return as `String` to frontend, displayed in status bar
+- File operations: Verify workspace boundary validation in `ensure_inside_workspace()`
+
+**Common Issues**:
+- "Command not found": Ensure command is registered in `invoke_handler!` macro
+- "Path not found": Check workspace boundary validation and path normalization
+- Terminal not responding: Verify PTY spawn command for platform (Windows uses PowerShell)
+- Hot reload not working: Frontend changes reload automatically; backend changes require restart
+
 ### TypeScript Configuration
 
 **`tsconfig.json`**:
@@ -264,11 +296,18 @@ Use Conventional Commit format:
 - `listDirectory(path?, includeHidden?)` → Get file nodes
 - `readFile(path)` → Load file content
 - `writeFile(path, content)` → Save file
+- `createFile(path)` → Create new file
+- `createDirectory(path)` → Create new directory
+- `renamePath(path, newName)` → Rename file or directory
+- `deletePath(path)` → Delete file or directory
+- `movePath(sourcePath, targetDirectoryPath)` → Move file or directory
 - `searchWorkspace(query, maxResults?, includeHidden?)` → Text search
 - `terminalCreate(shell?)` → Start new terminal session
 - `terminalList()` → List all terminal sessions
 - `terminalSnapshot(sessionId)` → Get terminal buffer snapshot
 - `terminalWrite(sessionId, input)` → Execute command in terminal
+- `terminalResize(sessionId, cols, rows)` → Resize terminal session
+- `terminalClear(sessionId)` → Clear terminal buffer
 - `terminalClose(sessionId)` → Close terminal session
 - `aiProviderSuggestions()` → Get available AI CLI providers
 - `aiRun(request)` → Execute AI command with workspace context

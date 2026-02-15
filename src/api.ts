@@ -6,6 +6,7 @@ import type {
   AiRunResult,
   FileContent,
   FileNode,
+  PathResult,
   SaveResult,
   SearchHit,
   TerminalSession,
@@ -34,6 +35,29 @@ export async function readFile(path: string): Promise<FileContent> {
 
 export async function writeFile(path: string, content: string): Promise<SaveResult> {
   return invoke<SaveResult>("write_file", { path, content });
+}
+
+export async function createFile(path: string): Promise<PathResult> {
+  return invoke<PathResult>("create_file", { path });
+}
+
+export async function createDirectory(path: string): Promise<PathResult> {
+  return invoke<PathResult>("create_directory", { path });
+}
+
+export async function renamePath(path: string, newName: string): Promise<PathResult> {
+  return invoke<PathResult>("rename_path", { path, newName });
+}
+
+export async function deletePath(path: string): Promise<Ack> {
+  return invoke<Ack>("delete_path", { path });
+}
+
+export async function movePath(sourcePath: string, targetDirectoryPath: string): Promise<PathResult> {
+  return invoke<PathResult>("move_path", {
+    sourcePath,
+    targetDirectoryPath,
+  });
 }
 
 export async function searchWorkspace(

@@ -438,6 +438,33 @@ input:focus {
   flex-shrink: 0;
 }
 
+.brand-meta {
+  min-width: 0;
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+}
+
+.brand-title {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+
+.brand-subtitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  max-width: 240px;
+}
+
 .header-menus {
   min-width: 0;
   height: 100%;
@@ -455,7 +482,11 @@ input:focus {
 }
 
 .menu-tab {
+  width: 34px;
   height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -463,12 +494,15 @@ input:focus {
   font-size: var(--font-size-sm);
   font-weight: 500;
   letter-spacing: 0.01em;
-  padding: 0 10px;
+  padding: 0;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
 }
 
 .menu-tab:hover,
 .header-menu.active .menu-tab {
-  background: var(--tree-hover-bg);
+  background: var(--surface-2);
+  border-color: var(--line-soft);
   color: var(--text);
 }
 
@@ -622,6 +656,7 @@ input:focus {
   display: grid;
   grid-template-columns: var(--explorer-width, 270px) var(--explorer-resize-handle-width) minmax(0, 1fr);
   gap: 0;
+  background: var(--surface-0);
 }
 
 .workbench-grid.explorer-hidden {
@@ -667,19 +702,65 @@ body.explorer-resizing .explorer-resizer::before {
 
 .explorer-panel {
   border: 0;
-  border-right: 0;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  box-shadow: inset -1px 0 0 var(--line-soft);
 }
 
 .editor-panel {
   border: 0;
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
   border-right: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
+  background: linear-gradient(180deg, var(--surface-1), var(--surface-0));
 }
 
 .explorer-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
+}
+
+.explorer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  box-shadow: inset 0 -1px 0 var(--line-soft);
+}
+
+.explorer-action {
+  height: 26px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 8px;
+}
+
+.explorer-action.icon-only {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  background: var(--surface-0);
+}
+
+.explorer-action:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.explorer-action svg {
+  flex-shrink: 0;
 }
 
 .explorer-root {
@@ -723,6 +804,17 @@ body.explorer-resizing .explorer-resizer::before {
 .tree-item.active {
   border-color: var(--line-strong);
   background: var(--tree-active-bg);
+}
+
+.tree-item.selected {
+  border-color: var(--tree-hover-border);
+  background: var(--tree-hover-bg);
+}
+
+.tree-item.drop-target,
+.tree-item.drop-target:hover {
+  border-color: var(--accent-border);
+  background: var(--tab-active-bg);
 }
 
 .tree-item.root:hover {
@@ -784,6 +876,56 @@ body.explorer-resizing .explorer-resizer::before {
   color: var(--accent);
 }
 
+.tree-context-menu {
+  position: fixed;
+  min-width: 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-0);
+  box-shadow: var(--shadow-elevated);
+  padding: 6px;
+  z-index: 120;
+}
+
+.tree-context-item {
+  width: 100%;
+  height: 28px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.tree-context-item:hover {
+  border-color: var(--tree-hover-border);
+  background: var(--tree-hover-bg);
+}
+
+.tree-context-item svg {
+  flex-shrink: 0;
+}
+
+.tree-context-item.danger {
+  color: var(--danger);
+}
+
+.tree-context-separator {
+  height: 1px;
+  margin: 4px;
+  background: var(--line-soft);
+}
+
 .main-panel {
   min-height: 0;
   display: flex;
@@ -803,8 +945,9 @@ body.explorer-resizing .explorer-resizer::before {
   justify-content: space-between;
   gap: 0;
   padding: 0 6px;
-  border-bottom: 1px solid var(--line-soft);
-  background: var(--tab-strip-bg);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--tab-strip-bg), var(--surface-1));
+  box-shadow: inset 0 -1px 0 var(--line-soft);
   overflow: hidden;
 }
 
@@ -836,6 +979,9 @@ body.explorer-resizing .explorer-resizer::before {
   font-size: 13px;
   font-weight: 700;
   padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .tab-add:hover {
@@ -852,12 +998,13 @@ body.explorer-resizing .explorer-resizer::before {
   min-width: 0;
   display: flex;
   align-items: center;
-  border-right: 1px solid var(--line-soft);
+  border-right: 1px solid var(--line);
   background: transparent;
 }
 
 .tab-item.active {
-  background: var(--tab-active-bg);
+  background: linear-gradient(180deg, var(--tab-active-bg), var(--surface-2));
+  box-shadow: inset 0 2px 0 var(--accent);
 }
 
 .tab-button {
@@ -938,6 +1085,8 @@ body.explorer-resizing .explorer-resizer::before {
   height: 100%;
   position: relative;
   overflow: hidden;
+  background: var(--surface-0);
+  box-shadow: inset 0 1px 0 var(--line-soft);
 }
 
 .terminal-surface {
@@ -997,13 +1146,14 @@ body.explorer-resizing .explorer-resizer::before {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--line);
   border-left: 0;
   border-right: 0;
   border-bottom: 0;
   border-radius: 0;
-  background: var(--statusbar-bg);
-  color: var(--muted);
+  background: linear-gradient(180deg, var(--statusbar-bg), var(--surface-1));
+  box-shadow: inset 0 1px 0 var(--line-soft);
+  color: var(--text);
   font-size: 12px;
   padding: 6px 9px;
 }
@@ -1032,12 +1182,33 @@ body.explorer-resizing .explorer-resizer::before {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
-  opacity: 0.8;
+  color: var(--text);
+  opacity: 0.75;
 }
 
 .statusbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0.7;
+}
+
+.statusbar-chip {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text);
+  padding: 0;
+}
+
+.statusbar-chip.warning {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 @media (max-width: 1260px) {
@@ -1077,6 +1248,10 @@ body.explorer-resizing .explorer-resizer::before {
     min-height: 30px;
   }
 
+  .brand-subtitle {
+    display: none;
+  }
+
   .header-menus {
     height: var(--height-base);
     grid-column: 1;
@@ -1109,6 +1284,10 @@ body.explorer-resizing .explorer-resizer::before {
 
   .workbench-grid.explorer-hidden {
     grid-template-rows: minmax(0, 1fr);
+  }
+
+  .statusbar-right {
+    display: none;
   }
 }
 
