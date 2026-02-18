@@ -422,16 +422,16 @@ fn move_path(
     let target_directory = resolve_existing_workspace_path(&target_directory_path, &root)?;
 
     if source == root {
-        return Err(String::from("Cannot move workspace root directory"));
+        return Err(String::from("MOVE_SOURCE_IS_ROOT"));
     }
 
     if !target_directory.is_dir() {
-        return Err(String::from("Move target must be a directory"));
+        return Err(String::from("MOVE_TARGET_NOT_DIRECTORY"));
     }
 
     let source_name = source
         .file_name()
-        .ok_or_else(|| String::from("Source path is missing file name"))?;
+        .ok_or_else(|| String::from("MOVE_IO_ERROR:Source path is missing file name"))?;
     let target_path = target_directory.join(source_name);
 
     if target_path == source {
@@ -441,16 +441,17 @@ fn move_path(
     }
 
     if target_path.exists() {
-        return Err(String::from("Target path already exists"));
+        return Err(String::from("MOVE_TARGET_EXISTS"));
     }
 
-    let source_metadata =
-        fs::metadata(&source).map_err(|error| format!("Failed to inspect source path: {error}"))?;
+    let source_metadata = fs::metadata(&source)
+        .map_err(|error| format!("MOVE_IO_ERROR:Failed to inspect source path: {error}"))?;
     if source_metadata.is_dir() && target_directory.starts_with(&source) {
-        return Err(String::from("Cannot move a directory into itself"));
+        return Err(String::from("MOVE_TARGET_INSIDE_SOURCE"));
     }
 
-    fs::rename(&source, &target_path).map_err(|error| format!("Failed to move path: {error}"))?;
+    fs::rename(&source, &target_path)
+        .map_err(|error| format!("MOVE_IO_ERROR:Failed to move path: {error}"))?;
 
     let canonical = canonicalize_path(&target_path, "Failed to resolve moved path")?;
     Ok(PathResult {

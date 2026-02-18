@@ -4,15 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
+Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspired by VSCode. The project aims to provide a lightweight, fast, and secure local-first coding experience.
 
-Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by VSCode. The project aims to provide a lightweight, fast, and secure local-first coding experience.
+**Tech Stack**: Tauri 2, React 19.1.0, Monaco Editor, xterm.js, portable-pty 0.9
 
 **Current Status**: Foundation phase (M0) - building workbench layout, editor engine, and backend file commands.
 
 ## Development Commands
 
 ### Core Development
-- `pnpm tauri dev` - Start development server with hot reload (Vite on port 1420)
+- `pnpm tauri dev` - Start full development environment (frontend + backend) with hot reload (Vite on port 1420)
+- `pnpm dev` - Start frontend development server only (for UI-only changes, faster iteration)
 - `pnpm build` - Build frontend for production (outputs to `dist/`)
 - `pnpm tauri build` - Build complete desktop application (outputs to `src-tauri/target/release/bundle/`)
 - `pnpm preview` - Preview production frontend build
@@ -46,6 +48,11 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 - `src/utils.ts` - Helper functions (language detection, path handling, arg parsing)
 - `src/hints.ts` - Keyword-based code suggestion system (defined but not yet integrated in UI)
 
+**UI Dependencies**:
+- `@monaco-editor/react` - Monaco Editor React wrapper
+- `@xterm/xterm` + `@xterm/addon-fit` - Terminal emulation with auto-sizing
+- `lucide-react` - Icon library for UI elements
+
 **Window Management**:
 - Custom window frame (`decorations: false` in tauri.conf.json)
 - Custom title bar with drag region (`data-tauri-drag-region`)
@@ -72,15 +79,22 @@ Vexc is a desktop code editor built with Tauri + React + TypeScript, inspired by
 - Handles keyboard shortcuts (Ctrl+S for save, Tab for hints, Escape to close hints)
 - Editor options: word wrap on, minimap disabled, 13px font, 2-space tabs
 
-**Terminal Integration** (xterm.js):
+**Terminal Integration** (xterm.js + portable-pty):
 - Uses `@xterm/xterm` with `@xterm/addon-fit` for auto-sizing
+- Backend uses `portable-pty` 0.9 for cross-platform PTY support
 - Single visible terminal instance switched between sessions via `redrawTerminal()`
-- Real-time output via Tauri event system (`terminal://output`)
+- Real-time output via Tauri 2 event system (`terminal://output`)
 - PowerShell spawns with `-NoLogo -NoProfile` arguments on Windows
 
 ### Backend Structure (Rust + Tauri)
 
 **Entry Point**: `src-tauri/src/lib.rs` - `run()` function registers all commands
+
+**Backend Dependencies** (from `src-tauri/Cargo.toml`):
+- `tauri 2` - Core framework (Tauri 2 with updated API)
+- `portable-pty 0.9` - Cross-platform PTY support for terminal sessions
+- `serde` + `serde_json` - Serialization for type-safe frontend-backend communication
+- `tauri-plugin-dialog 2.6.0` - Native file dialogs
 
 **State**: `AppState` struct with:
 - `workspace_root: Mutex<Option<PathBuf>>` - Current workspace directory
@@ -200,7 +214,7 @@ When contributing changes:
 4. **State Synchronization**: Use refs (`tabsRef`, `activeTabIdRef`, etc.) to avoid stale closures in async operations
 5. **Error Messages**: All Rust errors return as `String`, displayed in status bar
 6. **Ignored Directories**: `node_modules`, `dist`, `target` are automatically excluded from file tree and search
-7. **Security Policy**: CSP is currently set to `null` in `tauri.conf.json` - should be configured for production builds
+7. **⚠️ Security Policy**: CSP is currently set to `null` in `tauri.conf.json` - **MUST be configured before production builds** to prevent XSS attacks
 
 ### Key Constants
 
@@ -238,6 +252,7 @@ When contributing changes:
 - Console logs: Use `console.log()` for debugging; check browser console
 - React DevTools: Install browser extension for component inspection
 - Network tab: Monitor Tauri command invocation and response times
+- **UI-only development**: Use `pnpm dev` for faster iteration when only modifying frontend code (no backend changes)
 
 **Backend Issues**:
 - Rust errors: Check terminal where `pnpm tauri dev` is running
@@ -335,3 +350,7 @@ Current phase aims to complete M0 (Foundation):
 - AI CLI integration ✅
 
 Next: M1 (Core Editing) - Enhance file operations, dirty state handling, workspace search.
+
+---
+
+**Last Updated**: 2026-02-15

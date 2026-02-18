@@ -1,6 +1,6 @@
 import {
   type CSSProperties,
-  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
@@ -12,6 +12,8 @@ import {
 } from "react";
 import Editor from "@monaco-editor/react";
 import {
+  AArrowDown,
+  AArrowUp,
   Copy,
   File,
   FileArchive,
@@ -35,10 +37,8 @@ import {
   FolderPlus,
   FolderRoot,
   FolderSearch,
-  Info,
   Minus,
   Pencil,
-  Save,
   Square,
   Trash2,
   X,
@@ -72,47 +72,40 @@ import type {
   EditorTab,
   FileKind,
   FileNode,
+  MovePathErrorCode,
   TerminalOutputEvent,
   TerminalSession,
   TerminalSessionSnapshot,
   WorkspaceInfo,
 } from "./types";
+import {
+  type DropValidationResult,
+  type TreeDragSource,
+  type TreeDropRejectionReason,
+  useTreeDragDrop,
+} from "./features/explorer/useTreeDragDrop";
 import { detectLanguage, fileNameFromPath } from "./utils";
 import "./App.css";
 
 const WORKSPACE_STORAGE_KEY = "vexc.workspacePath";
-const COLOR_THEME_STORAGE_KEY = "vexc.colorTheme";
-const FILE_ICON_THEME_STORAGE_KEY = "vexc.fileIconTheme";
+const FONT_SIZE_STORAGE_KEY = "vexc.fontSize";
 
-type ColorThemeId = "dark-plus" | "light-plus" | "one-dark-pro-orange";
-type FileIconThemeId = "vscode-colored" | "vscode-minimal";
-type HeaderMenuId = "file" | "view" | "theme";
+type HeaderMenuId = "file";
 
-interface ColorThemeOption {
-  id: ColorThemeId;
-  label: string;
-  monacoThemeName: string;
-  monacoThemeData: MonacoEditor.IStandaloneThemeData;
-  terminalTheme: ITheme;
-}
-
-interface FileIconThemeOption {
-  id: FileIconThemeId;
-  label: string;
-}
-
-const DEFAULT_COLOR_THEME_ID: ColorThemeId = "dark-plus";
-const DEFAULT_FILE_ICON_THEME_ID: FileIconThemeId = "vscode-colored";
+const DEFAULT_FONT_SIZE = 13;
+const MIN_FONT_SIZE = 10;
+const MAX_FONT_SIZE = 24;
 const CODE_FONT_FAMILY = '"JetBrains Mono", "Cascadia Code", Consolas, monospace';
 const CODE_FONT_SIZE = 13;
 const CODE_LINE_HEIGHT = 18;
 const CODE_LINE_HEIGHT_RATIO = CODE_LINE_HEIGHT / CODE_FONT_SIZE;
+const TERMINAL_LINE_HEIGHT_RATIO = 1;
 const MAX_TERMINAL_BUFFER_CHARS = 1024 * 1024;
 const EXPLORER_DEFAULT_WIDTH = 270;
 const EXPLORER_MIN_WIDTH = 180;
 const EXPLORER_RESIZER_WIDTH = 6;
 const EXPLORER_MAIN_PANEL_MIN_WIDTH = 260;
-const TREE_DRAG_SOURCE_MIME = "application/x-vexc-tree-drag-source";
+const TREE_POINTER_DRAG_THRESHOLD_PX = 6;
 
 function clampTerminalBuffer(value: string): string {
   if (value.length <= MAX_TERMINAL_BUFFER_CHARS) {
@@ -121,192 +114,56 @@ function clampTerminalBuffer(value: string): string {
   return value.slice(value.length - MAX_TERMINAL_BUFFER_CHARS);
 }
 
-const colorThemeOptions: readonly ColorThemeOption[] = [
-  {
-    id: "dark-plus",
-    label: "Dark+ (VS Code)",
-    monacoThemeName: "vexc-dark-plus",
-    monacoThemeData: {
-      base: "vs-dark",
-      inherit: true,
-      rules: [
-        { token: "keyword", foreground: "569cd6" },
-        { token: "variable", foreground: "9cdcfe" },
-        { token: "string", foreground: "ce9178" },
-        { token: "function", foreground: "dcdcaa" },
-        { token: "number", foreground: "b5cea8" },
-        { token: "comment", foreground: "6a9955", fontStyle: "italic" },
-        { token: "type", foreground: "4ec9b0" },
-      ],
-      colors: {
-        "editor.background": "#1e1e1e",
-        "editor.foreground": "#d4d4d4",
-        "editorCursor.foreground": "#aeafad",
-        "editor.lineHighlightBackground": "#2a2d2e",
-        "editor.selectionBackground": "#264f78",
-        "editor.inactiveSelectionBackground": "#3a3d41",
-      },
-    },
-    terminalTheme: {
-      background: "#1e1e1e",
-      foreground: "#d4d4d4",
-      cursor: "#aeafad",
-      selectionBackground: "rgba(38, 79, 120, 0.35)",
-      black: "#000000",
-      red: "#cd3131",
-      green: "#0dbc79",
-      yellow: "#e5e510",
-      blue: "#2472c8",
-      magenta: "#bc3fbc",
-      cyan: "#11a8cd",
-      white: "#e5e5e5",
-      brightBlack: "#666666",
-      brightRed: "#f14c4c",
-      brightGreen: "#23d18b",
-      brightYellow: "#f5f543",
-      brightBlue: "#3b8eea",
-      brightMagenta: "#d670d6",
-      brightCyan: "#29b8db",
-      brightWhite: "#e5e5e5",
-    },
+// 默认暗色主题
+const DEFAULT_MONACO_THEME: MonacoEditor.IStandaloneThemeData = {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "keyword", foreground: "c678dd" },
+    { token: "variable", foreground: "e06c75" },
+    { token: "string", foreground: "98c379" },
+    { token: "function", foreground: "61afef" },
+    { token: "number", foreground: "d19a66" },
+    { token: "comment", foreground: "5c6370", fontStyle: "italic" },
+    { token: "type", foreground: "e5c07b" },
+  ],
+  colors: {
+    "editor.background": "#0a0c10",
+    "editor.foreground": "#abb2bf",
+    "editorCursor.foreground": "#d19a66",
+    "editor.lineHighlightBackground": "#13161c",
+    "editor.selectionBackground": "#2c313a",
+    "editor.inactiveSelectionBackground": "#1c1f26",
   },
-  {
-    id: "light-plus",
-    label: "Light+ (VS Code)",
-    monacoThemeName: "vexc-light-plus",
-    monacoThemeData: {
-      base: "vs",
-      inherit: true,
-      rules: [
-        { token: "keyword", foreground: "0000ff" },
-        { token: "variable", foreground: "001080" },
-        { token: "string", foreground: "a31515" },
-        { token: "function", foreground: "795e26" },
-        { token: "number", foreground: "098658" },
-        { token: "comment", foreground: "008000", fontStyle: "italic" },
-        { token: "type", foreground: "267f99" },
-      ],
-      colors: {
-        "editor.background": "#ffffff",
-        "editor.foreground": "#333333",
-        "editorCursor.foreground": "#111111",
-        "editor.lineHighlightBackground": "#f5f5f5",
-        "editor.selectionBackground": "#add6ff",
-        "editor.inactiveSelectionBackground": "#e5ebf1",
-      },
-    },
-    terminalTheme: {
-      background: "#ffffff",
-      foreground: "#222222",
-      cursor: "#1f2328",
-      selectionBackground: "rgba(10, 103, 206, 0.25)",
-      black: "#000000",
-      red: "#a1260d",
-      green: "#007100",
-      yellow: "#795e26",
-      blue: "#0451a5",
-      magenta: "#bc05bc",
-      cyan: "#0598bc",
-      white: "#a5a5a5",
-      brightBlack: "#666666",
-      brightRed: "#cd3131",
-      brightGreen: "#14ce14",
-      brightYellow: "#b5ba00",
-      brightBlue: "#0451a5",
-      brightMagenta: "#bc05bc",
-      brightCyan: "#0598bc",
-      brightWhite: "#a5a5a5",
-    },
-  },
-  {
-    id: "one-dark-pro-orange",
-    label: "One Dark Pro Orange",
-    monacoThemeName: "vexc-one-dark-pro-orange",
-    monacoThemeData: {
-      base: "vs-dark",
-      inherit: true,
-      rules: [
-        { token: "keyword", foreground: "c678dd" },
-        { token: "variable", foreground: "e06c75" },
-        { token: "string", foreground: "98c379" },
-        { token: "function", foreground: "61afef" },
-        { token: "number", foreground: "d19a66" },
-        { token: "comment", foreground: "5c6370", fontStyle: "italic" },
-        { token: "type", foreground: "e5c07b" },
-      ],
-      colors: {
-        "editor.background": "#0a0c10",
-        "editor.foreground": "#abb2bf",
-        "editorCursor.foreground": "#d19a66",
-        "editor.lineHighlightBackground": "#13161c",
-        "editor.selectionBackground": "#2c313a",
-        "editor.inactiveSelectionBackground": "#1c1f26",
-      },
-    },
-    terminalTheme: {
-      background: "#000000",
-      foreground: "#abb2bf",
-      cursor: "#d19a66",
-      selectionBackground: "rgba(209, 154, 102, 0.2)",
-      black: "#000000",
-      red: "#e06c75",
-      green: "#98c379",
-      yellow: "#e5c07b",
-      blue: "#61afef",
-      magenta: "#c678dd",
-      cyan: "#56b6c2",
-      white: "#abb2bf",
-      brightBlack: "#4b5263",
-      brightRed: "#e06c75",
-      brightGreen: "#98c379",
-      brightYellow: "#e5c07b",
-      brightBlue: "#61afef",
-      brightMagenta: "#c678dd",
-      brightCyan: "#56b6c2",
-      brightWhite: "#abb2bf",
-    },
-  },
-];
-
-const colorThemeConfigById: Record<ColorThemeId, ColorThemeOption> = {
-  "dark-plus": colorThemeOptions[0],
-  "light-plus": colorThemeOptions[1],
-  "one-dark-pro-orange": colorThemeOptions[2],
 };
 
-function isColorThemeId(value: string): value is ColorThemeId {
-  return Object.prototype.hasOwnProperty.call(colorThemeConfigById, value);
-}
+const DEFAULT_TERMINAL_THEME: ITheme = {
+  background: "#000000",
+  foreground: "#abb2bf",
+  cursor: "#d19a66",
+  selectionBackground: "rgba(209, 154, 102, 0.2)",
+  black: "#000000",
+  red: "#e06c75",
+  green: "#98c379",
+  yellow: "#e5c07b",
+  blue: "#61afef",
+  magenta: "#c678dd",
+  cyan: "#56b6c2",
+  white: "#abb2bf",
+  brightBlack: "#4b5263",
+  brightRed: "#e06c75",
+  brightGreen: "#98c379",
+  brightYellow: "#e5c07b",
+  brightBlue: "#61afef",
+  brightMagenta: "#c678dd",
+  brightCyan: "#56b6c2",
+  brightWhite: "#abb2bf",
+};
 
-function resolveColorThemeById(themeId: string | null): ColorThemeOption {
-  if (themeId && isColorThemeId(themeId)) {
-    return colorThemeConfigById[themeId];
-  }
-  return colorThemeConfigById[DEFAULT_COLOR_THEME_ID];
-}
-
-const fileIconThemeOptions: readonly FileIconThemeOption[] = [
-  {
-    id: "vscode-colored",
-    label: "VSCode Colored",
-  },
-  {
-    id: "vscode-minimal",
-    label: "VSCode Minimal",
-  },
-];
-
-function readStoredColorThemeId(): ColorThemeId {
-  const stored = localStorage.getItem(COLOR_THEME_STORAGE_KEY);
-  return resolveColorThemeById(stored).id;
-}
-
-function readStoredFileIconThemeId(): FileIconThemeId {
-  const stored = localStorage.getItem(FILE_ICON_THEME_STORAGE_KEY);
-  if (stored === "vscode-colored" || stored === "vscode-minimal") {
-    return stored;
-  }
-  return DEFAULT_FILE_ICON_THEME_ID;
+function readStoredFontSize(): number {
+  const stored = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
+  const size = stored ? Number.parseInt(stored, 10) : DEFAULT_FONT_SIZE;
+  return Number.isFinite(size) && size >= MIN_FONT_SIZE && size <= MAX_FONT_SIZE ? size : DEFAULT_FONT_SIZE;
 }
 
 interface PendingPosition {
@@ -329,40 +186,23 @@ interface TreeContextMenuState {
   y: number;
 }
 
-interface TreeDragSource {
-  path: string;
-  kind: FileKind;
+interface TreeInlineCreateState {
+  id: number;
+  mode: "create-file" | "create-directory";
+  targetDirectoryPath: string;
+  value: string;
 }
 
-type TreeDropRejectionReason =
-  | "missing-source"
-  | "same-path"
-  | "same-parent"
-  | "target-inside-source";
-
-function parseTreeDragSourcePayload(payload: string): TreeDragSource | null {
-  if (!payload) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(payload) as Partial<TreeDragSource>;
-    if (!parsed || typeof parsed.path !== "string") {
-      return null;
-    }
-
-    if (parsed.kind !== "file" && parsed.kind !== "directory") {
-      return null;
-    }
-
-    return {
-      path: parsed.path,
-      kind: parsed.kind,
-    };
-  } catch {
-    return null;
-  }
+interface TreeInlineRenameState {
+  id: number;
+  mode: "rename";
+  targetPath: string;
+  targetKind: FileKind;
+  originalName: string;
+  value: string;
 }
+
+type TreeInlineEditState = TreeInlineCreateState | TreeInlineRenameState;
 
 function resolveWorkbenchFallbackAfterClose(
   fileTabs: readonly EditorTab[],
@@ -403,7 +243,9 @@ function normalizePathForComparison(path: string): string {
   }
 
   const trimmed = normalized.replace(/\/+$/, "");
-  return trimmed || normalized;
+  const candidate = trimmed || normalized;
+  const isWindowsPath = /^[a-zA-Z]:\//.test(candidate) || candidate.startsWith("//");
+  return isWindowsPath ? candidate.toLowerCase() : candidate;
 }
 
 function isSamePath(left: string, right: string): boolean {
@@ -421,25 +263,36 @@ function inferPathSeparator(path: string): "/" | "\\" {
   return path.includes("\\") ? "\\" : "/";
 }
 
-function applyPathSeparator(path: string, separator: "/" | "\\"): string {
-  if (separator === "\\") {
-    return path.replace(/\//g, "\\");
-  }
-  return path;
-}
-
 function replacePathPrefix(path: string, previousPrefix: string, nextPrefix: string): string {
   if (!isSameOrDescendantPath(path, previousPrefix)) {
     return path;
   }
 
-  const normalizedPath = normalizePathForComparison(path);
-  const normalizedPrevious = normalizePathForComparison(previousPrefix);
-  const normalizedNext = normalizePathForComparison(nextPrefix);
-  const suffix = normalizedPath.slice(normalizedPrevious.length);
-  const mappedPath = `${normalizedNext}${suffix}`;
+  // Preserve the original suffix casing from the source path.
+  const prevLen = previousPrefix.length;
+  let suffixStart = prevLen;
 
-  return applyPathSeparator(mappedPath, inferPathSeparator(nextPrefix));
+  if (suffixStart < path.length && (path[suffixStart] === "/" || path[suffixStart] === "\\")) {
+    suffixStart++;
+  }
+
+  const originalSuffix = path.substring(suffixStart);
+  const separator = inferPathSeparator(nextPrefix);
+  let result = nextPrefix;
+
+  if (originalSuffix) {
+    if (
+      !nextPrefix.endsWith("/") &&
+      !nextPrefix.endsWith("\\") &&
+      !originalSuffix.startsWith("/") &&
+      !originalSuffix.startsWith("\\")
+    ) {
+      result += separator;
+    }
+    result += originalSuffix;
+  }
+
+  return result;
 }
 
 function joinPath(basePath: string, name: string): string {
@@ -479,6 +332,43 @@ function isValidNodeName(value: string): boolean {
   }
 
   return !/[\\/]/.test(trimmed);
+}
+
+const MOVE_PATH_ERROR_MESSAGES: Record<MovePathErrorCode, string> = {
+  MOVE_SOURCE_IS_ROOT: "不能移动工作区根目录。",
+  MOVE_TARGET_NOT_DIRECTORY: "拖拽目标不是文件夹。",
+  MOVE_TARGET_EXISTS: "目标位置已存在同名文件或文件夹。",
+  MOVE_TARGET_INSIDE_SOURCE: "不能将文件夹移动到其自身内部。",
+  MOVE_IO_ERROR: "移动失败：文件系统操作出错。",
+};
+
+function parseMovePathErrorCode(error: unknown): MovePathErrorCode | null {
+  const message = String(error ?? "");
+  if (message.startsWith("MOVE_SOURCE_IS_ROOT")) {
+    return "MOVE_SOURCE_IS_ROOT";
+  }
+  if (message.startsWith("MOVE_TARGET_NOT_DIRECTORY")) {
+    return "MOVE_TARGET_NOT_DIRECTORY";
+  }
+  if (message.startsWith("MOVE_TARGET_EXISTS")) {
+    return "MOVE_TARGET_EXISTS";
+  }
+  if (message.startsWith("MOVE_TARGET_INSIDE_SOURCE")) {
+    return "MOVE_TARGET_INSIDE_SOURCE";
+  }
+  if (message.startsWith("MOVE_IO_ERROR")) {
+    return "MOVE_IO_ERROR";
+  }
+
+  return null;
+}
+
+function toDropValidationResult(reason: TreeDropRejectionReason | null): DropValidationResult {
+  if (!reason) {
+    return { ok: true, reason: null };
+  }
+
+  return { ok: false, reason };
 }
 
 type TreeIconTone =
@@ -601,6 +491,8 @@ interface FileVisualDescriptor {
   kind: FileVisualKind;
   tone: TreeIconTone;
 }
+
+type FileIconThemeId = "vscode-colored" | "vscode-minimal";
 
 function describeDirectoryVisual(name: string, isRoot = false): DirectoryVisualDescriptor {
   if (isRoot) {
@@ -972,27 +864,21 @@ function App() {
 
   const [pendingPosition, setPendingPosition] = useState<PendingPosition | null>(null);
   const [editorReadySeq, setEditorReadySeq] = useState(0);
-  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [, setStatusMessage] = useState("Ready");
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [isExplorerVisible, setIsExplorerVisible] = useState(true);
   const [explorerWidth, setExplorerWidth] = useState(EXPLORER_DEFAULT_WIDTH);
   const [isExplorerResizing, setIsExplorerResizing] = useState(false);
   const [activeWorkbenchTabKind, setActiveWorkbenchTabKind] = useState<WorkbenchTabKind>("file");
-  const [activeColorThemeId, setActiveColorThemeId] = useState<ColorThemeId>(() => readStoredColorThemeId());
-  const [activeFileIconThemeId, setActiveFileIconThemeId] = useState<FileIconThemeId>(() =>
-    readStoredFileIconThemeId(),
-  );
+  const [fontSize, setFontSize] = useState<number>(() => readStoredFontSize());
   const [activeHeaderMenuId, setActiveHeaderMenuId] = useState<HeaderMenuId | null>(null);
   const [selectedTreePath, setSelectedTreePath] = useState<string | null>(null);
   const [selectedTreeKind, setSelectedTreeKind] = useState<FileKind | null>(null);
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
-  const [treeDropTargetPath, setTreeDropTargetPath] = useState<string | null>(null);
+  const [treeInlineEdit, setTreeInlineEdit] = useState<TreeInlineEditState | null>(null);
+  const [isTreeInlineEditSubmitting, setIsTreeInlineEditSubmitting] = useState(false);
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
-  const activeColorTheme = useMemo(
-    () => colorThemeConfigById[activeColorThemeId],
-    [activeColorThemeId],
-  );
 
   const monacoEditorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const monacoApiRef = useRef<typeof import("monaco-editor") | null>(null);
@@ -1002,11 +888,27 @@ function App() {
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const treeContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const treeInlineInputRef = useRef<HTMLInputElement | null>(null);
   const workbenchGridRef = useRef<HTMLDivElement | null>(null);
   const explorerResizePointerIdRef = useRef<number | null>(null);
   const explorerLastVisibleWidthRef = useRef(EXPLORER_DEFAULT_WIDTH);
-  const treeDragSourceRef = useRef<TreeDragSource | null>(null);
-  const treeDropRejectionSignatureRef = useRef<string | null>(null);
+  const treeInlineEditIdRef = useRef(0);
+
+  const {
+    dndState: treeDnDState,
+    consumeClickSuppression: consumeTreeDragClickSuppression,
+    clearTreeDragDropState,
+    handleTreePointerDown,
+  } = useTreeDragDrop({
+    dragThresholdPx: TREE_POINTER_DRAG_THRESHOLD_PX,
+    isSamePath,
+    validateDrop: (source, targetDirectoryPath) =>
+      toDropValidationResult(getTreeDropRejectionReason(source, targetDirectoryPath)),
+    onDrop: (source, targetDirectoryPath) => handleMoveTreePath(source, targetDirectoryPath),
+    onDragStart: () => {
+      closeTreeContextMenu();
+    },
+  });
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -1025,38 +927,41 @@ function App() {
   }, [terminalBuffers]);
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-color-theme", activeColorThemeId);
-    localStorage.setItem(COLOR_THEME_STORAGE_KEY, activeColorThemeId);
-  }, [activeColorThemeId]);
+    // 设置默认暗色主题
+    document.documentElement.setAttribute("data-color-theme", "one-dark-pro-orange");
+  }, []);
 
   useEffect(() => {
-    const selectedTheme = resolveColorThemeById(activeColorThemeId);
+    localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(fontSize));
 
     const monacoApi = monacoApiRef.current;
-    if (monacoApi) {
+    const editor = monacoEditorRef.current;
+    if (monacoApi && editor) {
       try {
-        monacoApi.editor.setTheme(selectedTheme.monacoThemeName);
+        const lineHeight = Math.round(fontSize * CODE_LINE_HEIGHT_RATIO);
+        editor.updateOptions({
+          fontSize: fontSize,
+          lineHeight: lineHeight,
+        });
       } catch (error) {
-        setStatusMessage(`Failed to apply editor theme: ${String(error)}`);
+        setStatusMessage(`Failed to apply font size: ${String(error)}`);
       }
     }
-  }, [activeColorThemeId]);
 
-  useEffect(() => {
-    const selectedTheme = resolveColorThemeById(activeColorThemeId);
+    // Also update the terminal font size if terminal is initialized
     const terminal = terminalRef.current;
     if (terminal) {
       try {
-        terminal.options.theme = selectedTheme.terminalTheme;
+        terminal.options.fontSize = fontSize;
+        // Trigger a resize to ensure the terminal adapts to the new font size
+        setTimeout(() => {
+          fitAddonRef.current?.fit();
+        }, 0);
       } catch (error) {
-        setStatusMessage(`Failed to apply terminal theme: ${String(error)}`);
+        setStatusMessage(`Failed to apply terminal font size: ${String(error)}`);
       }
     }
-  }, [activeColorThemeId]);
-
-  useEffect(() => {
-    localStorage.setItem(FILE_ICON_THEME_STORAGE_KEY, activeFileIconThemeId);
-  }, [activeFileIconThemeId]);
+  }, [fontSize]);
 
   useEffect(() => {
     if (!activeHeaderMenuId) {
@@ -1129,6 +1034,28 @@ function App() {
   }, [treeContextMenu]);
 
   useEffect(() => {
+    if (!treeInlineEdit) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const input = treeInlineInputRef.current;
+      if (!input) {
+        return;
+      }
+
+      input.focus();
+      if (treeInlineEdit.mode === "rename") {
+        input.select();
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [treeInlineEdit?.id]);
+
+  useEffect(() => {
     if (!isExplorerResizing) {
       document.body.classList.remove("explorer-resizing");
       return;
@@ -1147,29 +1074,6 @@ function App() {
 
   const isFileTabActive = activeWorkbenchTabKind === "file";
   const activeFileTab = isFileTabActive ? activeTab : null;
-  const activeTerminal = useMemo(
-    () => terminals.find((session) => session.id === activeTerminalId) ?? null,
-    [terminals, activeTerminalId],
-  );
-  const contextPath = useMemo(() => {
-    if (isFileTabActive && activeTab) {
-      return activeTab.path;
-    }
-
-    if (activeWorkbenchTabKind === "terminal") {
-      return activeTerminal?.cwd ?? workspace?.rootPath ?? null;
-    }
-
-    return selectedTreePath ?? workspace?.rootPath ?? null;
-  }, [
-    isFileTabActive,
-    activeTab,
-    activeWorkbenchTabKind,
-    activeTerminal?.cwd,
-    selectedTreePath,
-    workspace?.rootPath,
-  ]);
-  const activeTabDirty = activeTab ? tabIsDirty(activeTab) : false;
 
   const hasDirtyTabs = useMemo(
     () => tabs.some((tab) => tab.content !== tab.savedContent),
@@ -1197,6 +1101,10 @@ function App() {
     }
 
     showExplorerPanel();
+  }
+
+  function adjustFontSize(delta: number): void {
+    setFontSize((previous) => Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, previous + delta)));
   }
 
   function stopExplorerResize(handle: HTMLDivElement | null): void {
@@ -1408,13 +1316,6 @@ function App() {
       return replacePathPrefix(previous, previousPath, nextPath);
     });
 
-    setTreeDropTargetPath((previous) => {
-      if (!previous || !isSameOrDescendantPath(previous, previousPath)) {
-        return previous;
-      }
-      return replacePathPrefix(previous, previousPath, nextPath);
-    });
-
     setTreeContextMenu((previous) => {
       if (!previous || !isSameOrDescendantPath(previous.path, previousPath)) {
         return previous;
@@ -1506,13 +1407,21 @@ function App() {
       setSelectedTreeKind(null);
     }
 
-    setTreeDropTargetPath((previous) =>
-      previous && isSameOrDescendantPath(previous, path) ? null : previous,
-    );
-
     setTreeContextMenu((previous) =>
       previous && isSameOrDescendantPath(previous.path, path) ? null : previous,
     );
+
+    setTreeInlineEdit((previous) => {
+      if (!previous) {
+        return previous;
+      }
+
+      if (previous.mode === "rename") {
+        return isSameOrDescendantPath(previous.targetPath, path) ? null : previous;
+      }
+
+      return isSameOrDescendantPath(previous.targetDirectoryPath, path) ? null : previous;
+    });
   }
 
   function removeTabsByPath(path: string): void {
@@ -1535,37 +1444,71 @@ function App() {
     setActiveTabId(fallbackTab ? fallbackTab.id : null);
   }
 
-  async function promptCreateNode(
-    kind: FileKind,
-    preferredPath?: string,
-    preferredKind?: FileKind,
-  ): Promise<void> {
-    const targetDirectoryPath = resolveCreationDirectoryPath(preferredPath, preferredKind);
-    if (!targetDirectoryPath) {
-      setStatusMessage("No workspace selected.");
+  function createTreeInlineEditSessionId(): number {
+    treeInlineEditIdRef.current += 1;
+    return treeInlineEditIdRef.current;
+  }
+
+  function cancelTreeInlineEdit(): void {
+    if (isTreeInlineEditSubmitting) {
       return;
     }
 
-    const promptLabel = kind === "file" ? "文件" : "文件夹";
-    const input = window.prompt(`请输入${promptLabel}名称`);
-    if (input === null) {
+    setTreeInlineEdit(null);
+  }
+
+  function updateTreeInlineEditValue(value: string): void {
+    setTreeInlineEdit((previous) => (previous ? { ...previous, value } : previous));
+  }
+
+  async function submitTreeInlineEdit(): Promise<void> {
+    if (!treeInlineEdit || isTreeInlineEditSubmitting) {
       return;
     }
 
-    const name = input.trim();
-    if (!isValidNodeName(name)) {
+    const value = treeInlineEdit.value.trim();
+    if (!isValidNodeName(value)) {
       setStatusMessage("名称无效：不能为空，且不能包含路径分隔符。");
       return;
     }
 
-    const targetPath = joinPath(targetDirectoryPath, name);
+    setIsTreeInlineEditSubmitting(true);
 
     try {
+      if (treeInlineEdit.mode === "rename") {
+        if (workspace && isSamePath(treeInlineEdit.targetPath, workspace.rootPath)) {
+          setStatusMessage("Workspace root cannot be renamed.");
+          return;
+        }
+
+        if (value === treeInlineEdit.originalName) {
+          setTreeInlineEdit(null);
+          return;
+        }
+
+        const result = await renamePath(treeInlineEdit.targetPath, value);
+        remapPathInExplorerState(treeInlineEdit.targetPath, result.path);
+        remapPathInTabs(treeInlineEdit.targetPath, result.path);
+
+        const sourceParentPath = parentPath(treeInlineEdit.targetPath);
+        const targetParentPath = parentPath(result.path);
+        refreshDirectoryEntries([sourceParentPath ?? "", targetParentPath ?? ""]);
+
+        setSelectedTreePath(result.path);
+        setSelectedTreeKind(treeInlineEdit.targetKind);
+        setStatusMessage(`Renamed to ${fileNameFromPath(result.path)}`);
+        setTreeInlineEdit(null);
+        return;
+      }
+
+      const kind: FileKind = treeInlineEdit.mode === "create-file" ? "file" : "directory";
+      const label = kind === "file" ? "文件" : "文件夹";
+      const targetPath = joinPath(treeInlineEdit.targetDirectoryPath, value);
       const result = kind === "file"
         ? await createFile(targetPath)
         : await createDirectory(targetPath);
 
-      refreshDirectoryEntries([targetDirectoryPath]);
+      refreshDirectoryEntries([treeInlineEdit.targetDirectoryPath]);
 
       if (kind === "file") {
         setSelectedTreePath(result.path);
@@ -1580,49 +1523,113 @@ function App() {
         setSelectedTreeKind("directory");
       }
 
-      setStatusMessage(`Created ${promptLabel}: ${fileNameFromPath(result.path)}`);
+      setStatusMessage(`Created ${label}: ${fileNameFromPath(result.path)}`);
+      setTreeInlineEdit(null);
     } catch (error) {
-      setStatusMessage(`Failed to create ${promptLabel}: ${String(error)}`);
+      if (treeInlineEdit.mode === "rename") {
+        setStatusMessage(`Rename failed: ${String(error)}`);
+      } else {
+        const label = treeInlineEdit.mode === "create-file" ? "文件" : "文件夹";
+        setStatusMessage(`Failed to create ${label}: ${String(error)}`);
+      }
+    } finally {
+      setIsTreeInlineEditSubmitting(false);
     }
   }
 
-  async function handleRenameTreePath(path: string, kind: FileKind): Promise<void> {
+  function promptCreateNode(
+    kind: FileKind,
+    preferredPath?: string,
+    preferredKind?: FileKind,
+  ): void {
+    const targetDirectoryPath = resolveCreationDirectoryPath(preferredPath, preferredKind);
+    if (!targetDirectoryPath) {
+      setStatusMessage("No workspace selected.");
+      return;
+    }
+
+    closeTreeContextMenu();
+    setExpandedByPath((previous) => ({
+      ...previous,
+      [targetDirectoryPath]: true,
+    }));
+    if (!treeByPath[targetDirectoryPath]) {
+      void loadDirectory(targetDirectoryPath);
+    }
+
+    setSelectedTreePath(targetDirectoryPath);
+    setSelectedTreeKind("directory");
+    setIsTreeInlineEditSubmitting(false);
+    setTreeInlineEdit({
+      id: createTreeInlineEditSessionId(),
+      mode: kind === "file" ? "create-file" : "create-directory",
+      targetDirectoryPath,
+      value: "",
+    });
+  }
+
+  function handleRenameTreePath(path: string, kind: FileKind): void {
     if (workspace && isSamePath(path, workspace.rootPath)) {
       setStatusMessage("Workspace root cannot be renamed.");
       return;
     }
 
-    const currentName = fileNameFromPath(path);
-    const input = window.prompt("请输入新名称", currentName);
-    if (input === null) {
+    closeTreeContextMenu();
+    setSelectedTreePath(path);
+    setSelectedTreeKind(kind);
+    setIsTreeInlineEditSubmitting(false);
+    setTreeInlineEdit({
+      id: createTreeInlineEditSessionId(),
+      mode: "rename",
+      targetPath: path,
+      targetKind: kind,
+      originalName: fileNameFromPath(path),
+      value: fileNameFromPath(path),
+    });
+  }
+
+  function handleTreeInlineInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
+    event.stopPropagation();
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTreeInlineEdit();
       return;
     }
 
-    const nextName = input.trim();
-    if (!isValidNodeName(nextName)) {
-      setStatusMessage("名称无效：不能为空，且不能包含路径分隔符。");
-      return;
+    if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      void submitTreeInlineEdit();
     }
+  }
 
-    if (nextName === currentName) {
-      return;
-    }
-
-    try {
-      const result = await renamePath(path, nextName);
-      remapPathInExplorerState(path, result.path);
-      remapPathInTabs(path, result.path);
-
-      const sourceParentPath = parentPath(path);
-      const targetParentPath = parentPath(result.path);
-      refreshDirectoryEntries([sourceParentPath ?? "", targetParentPath ?? ""]);
-
-      setSelectedTreePath(result.path);
-      setSelectedTreeKind(kind);
-      setStatusMessage(`Renamed to ${fileNameFromPath(result.path)}`);
-    } catch (error) {
-      setStatusMessage(`Rename failed: ${String(error)}`);
-    }
+  function renderTreeInlineEditor(
+    edit: TreeInlineEditState,
+    depth: number,
+    kind: FileKind,
+  ): ReactElement {
+    return (
+      <div
+        className="tree-item inline-edit"
+        style={{ paddingLeft: `${6 + depth * 11}px` }}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <span className="tree-marker tone-default">
+          {kind === "directory" ? <Folder size={14} /> : <File size={14} />}
+        </span>
+        <input
+          ref={treeInlineInputRef}
+          className="tree-inline-input"
+          value={edit.value}
+          aria-label={edit.mode === "rename" ? "重命名" : "新建名称"}
+          disabled={isTreeInlineEditSubmitting}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => updateTreeInlineEditValue(event.target.value)}
+          onKeyDown={handleTreeInlineInputKeyDown}
+        />
+        {isTreeInlineEditSubmitting ? <span className="tree-loading">saving...</span> : null}
+      </div>
+    );
   }
 
   async function handleDeleteTreePath(path: string, kind: FileKind): Promise<void> {
@@ -1650,38 +1657,6 @@ function App() {
     }
   }
 
-  function resolveTreeDragSource(event: ReactDragEvent<HTMLElement>): TreeDragSource | null {
-    const fromRef = treeDragSourceRef.current;
-    if (fromRef) {
-      return fromRef;
-    }
-
-    const payloadSource = parseTreeDragSourcePayload(event.dataTransfer.getData(TREE_DRAG_SOURCE_MIME));
-    if (payloadSource) {
-      treeDragSourceRef.current = payloadSource;
-      return payloadSource;
-    }
-
-    const fallbackPath = event.dataTransfer.getData("text/plain").trim();
-    if (!fallbackPath) {
-      return null;
-    }
-
-    const fallbackKind = selectedTreePath && isSamePath(selectedTreePath, fallbackPath)
-      ? selectedTreeKind
-      : null;
-    if (fallbackKind !== "file" && fallbackKind !== "directory") {
-      return null;
-    }
-
-    const fallbackSource: TreeDragSource = {
-      path: fallbackPath,
-      kind: fallbackKind,
-    };
-    treeDragSourceRef.current = fallbackSource;
-    return fallbackSource;
-  }
-
   function getTreeDropRejectionReason(
     source: TreeDragSource | null,
     targetDirectoryPath: string,
@@ -1706,36 +1681,9 @@ function App() {
     return null;
   }
 
-  function reportTreeDropRejection(
-    reason: TreeDropRejectionReason,
-    source: TreeDragSource | null,
-    targetDirectoryPath: string,
-  ): void {
-    const sourcePath = source?.path ?? "<none>";
-    const signature = `${reason}:${sourcePath}->${targetDirectoryPath}`;
-    if (treeDropRejectionSignatureRef.current === signature) {
-      return;
-    }
-
-    treeDropRejectionSignatureRef.current = signature;
-    console.debug("[tree-dnd] drop rejected", {
-      reason,
-      sourcePath: source?.path ?? null,
-      sourceKind: source?.kind ?? null,
-      targetDirectoryPath,
-    });
-  }
-
-  function clearTreeDropRejectionTrace(): void {
-    treeDropRejectionSignatureRef.current = null;
-  }
-
-  function canDropTreePath(source: TreeDragSource | null, targetDirectoryPath: string): boolean {
-    return getTreeDropRejectionReason(source, targetDirectoryPath) === null;
-  }
-
   async function handleMoveTreePath(source: TreeDragSource, targetDirectoryPath: string): Promise<void> {
-    if (!canDropTreePath(source, targetDirectoryPath)) {
+    const rejectionReason = getTreeDropRejectionReason(source, targetDirectoryPath);
+    if (rejectionReason) {
       return;
     }
 
@@ -1752,76 +1700,14 @@ function App() {
       setSelectedTreeKind(source.kind);
       setStatusMessage(`Moved: ${fileNameFromPath(source.path)} -> ${targetDirectoryPath}`);
     } catch (error) {
+      const errorCode = parseMovePathErrorCode(error);
+      if (errorCode) {
+        setStatusMessage(MOVE_PATH_ERROR_MESSAGES[errorCode]);
+        return;
+      }
+
       setStatusMessage(`Move failed: ${String(error)}`);
     }
-  }
-
-  function handleTreeDragStart(event: ReactDragEvent<HTMLElement>, node: TreeDragSource): void {
-    treeDragSourceRef.current = node;
-    clearTreeDropRejectionTrace();
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData(TREE_DRAG_SOURCE_MIME, JSON.stringify(node));
-    event.dataTransfer.setData("text/plain", node.path);
-    setSelectedTreePath(node.path);
-    setSelectedTreeKind(node.kind);
-    closeTreeContextMenu();
-  }
-
-  function handleTreeDragEnd(): void {
-    treeDragSourceRef.current = null;
-    clearTreeDropRejectionTrace();
-    setTreeDropTargetPath(null);
-  }
-
-  function handleTreeDragOver(event: ReactDragEvent<HTMLElement>, targetDirectoryPath: string): void {
-    const source = resolveTreeDragSource(event);
-    const rejectionReason = getTreeDropRejectionReason(source, targetDirectoryPath);
-    if (rejectionReason) {
-      reportTreeDropRejection(rejectionReason, source, targetDirectoryPath);
-      if (treeDropTargetPath) {
-        setTreeDropTargetPath(null);
-      }
-      return;
-    }
-
-    clearTreeDropRejectionTrace();
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-
-    if (!treeDropTargetPath || !isSamePath(treeDropTargetPath, targetDirectoryPath)) {
-      setTreeDropTargetPath(targetDirectoryPath);
-    }
-  }
-
-  function handleTreeDragLeave(event: ReactDragEvent<HTMLElement>, targetDirectoryPath: string): void {
-    const relatedTarget = event.relatedTarget;
-    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
-      return;
-    }
-
-    if (!treeDropTargetPath || !isSamePath(treeDropTargetPath, targetDirectoryPath)) {
-      return;
-    }
-
-    setTreeDropTargetPath(null);
-  }
-
-  function handleTreeDrop(event: ReactDragEvent<HTMLElement>, targetDirectoryPath: string): void {
-    event.preventDefault();
-
-    const source = resolveTreeDragSource(event);
-    const rejectionReason = getTreeDropRejectionReason(source, targetDirectoryPath);
-
-    treeDragSourceRef.current = null;
-    clearTreeDropRejectionTrace();
-    setTreeDropTargetPath(null);
-
-    if (rejectionReason || !source) {
-      reportTreeDropRejection(rejectionReason ?? "missing-source", source, targetDirectoryPath);
-      return;
-    }
-
-    void handleMoveTreePath(source, targetDirectoryPath);
   }
 
   function openTreeContextMenu(
@@ -1830,6 +1716,7 @@ function App() {
     kind: FileKind,
   ): void {
     event.preventDefault();
+    setTreeInlineEdit(null);
     setSelectedTreePath(path);
     setSelectedTreeKind(kind);
     setTreeContextMenu({
@@ -2081,9 +1968,9 @@ function App() {
       setSelectedTreePath(info.rootPath);
       setSelectedTreeKind("directory");
       setTreeContextMenu(null);
-      setTreeDropTargetPath(null);
-      treeDragSourceRef.current = null;
-      clearTreeDropRejectionTrace();
+      setTreeInlineEdit(null);
+      setIsTreeInlineEditSubmitting(false);
+      clearTreeDragDropState();
       await loadDirectory(info.rootPath);
 
       const existingSessions = await terminalList();
@@ -2410,14 +2297,12 @@ function App() {
     setEditorReadySeq((value) => value + 1);
 
     if (!monacoThemesRegisteredRef.current) {
-      for (const theme of colorThemeOptions) {
-        monacoApi.editor.defineTheme(theme.monacoThemeName, theme.monacoThemeData);
-      }
+      monacoApi.editor.defineTheme("vexc-one-dark-pro-orange", DEFAULT_MONACO_THEME);
       monacoThemesRegisteredRef.current = true;
     }
 
     try {
-      monacoApi.editor.setTheme(activeColorTheme.monacoThemeName);
+      monacoApi.editor.setTheme("vexc-one-dark-pro-orange");
     } catch (error) {
       setStatusMessage(`Failed to apply editor theme: ${String(error)}`);
     }
@@ -2497,67 +2382,105 @@ function App() {
     }
   }
 
-  function renderTree(nodes: FileNode[], depth: number): ReactElement[] {
-    return nodes.map((node) => {
+  function renderTree(
+    nodes: FileNode[],
+    depth: number,
+    parentDirectoryPath: string,
+  ): ReactElement[] {
+    const elements: ReactElement[] = [];
+
+    if (
+      treeInlineEdit &&
+      treeInlineEdit.mode !== "rename" &&
+      isSamePath(treeInlineEdit.targetDirectoryPath, parentDirectoryPath)
+    ) {
+      const createKind: FileKind = treeInlineEdit.mode === "create-file" ? "file" : "directory";
+      elements.push(
+        <div key={`inline-create:${parentDirectoryPath}:${treeInlineEdit.id}`}>
+          {renderTreeInlineEditor(treeInlineEdit, depth, createKind)}
+        </div>,
+      );
+    }
+
+    for (const node of nodes) {
       const isDirectory = node.kind === "directory";
       const expanded = Boolean(expandedByPath[node.path]);
       const loading = Boolean(loadingByPath[node.path]);
       const openingFile = !isDirectory && Boolean(openingFilesByPath[node.path]);
       const selected = selectedTreePath ? isSamePath(selectedTreePath, node.path) : false;
-      const isDropTarget = isDirectory && treeDropTargetPath ? isSamePath(treeDropTargetPath, node.path) : false;
+      const isValidDropTarget = isDirectory && treeDnDState.dropTargetPath
+        ? isSamePath(treeDnDState.dropTargetPath, node.path)
+        : false;
+      const isInvalidDropTarget = isDirectory && treeDnDState.invalidDropTargetPath
+        ? isSamePath(treeDnDState.invalidDropTargetPath, node.path)
+        : false;
+      const isDraggingSource = treeDnDState.dragSourcePath
+        ? isSamePath(treeDnDState.dragSourcePath, node.path)
+        : false;
       const visual = isDirectory
-        ? resolveDirectoryVisual(node.name, expanded, activeFileIconThemeId)
-        : resolveFileVisual(node.name, activeFileIconThemeId);
+        ? resolveDirectoryVisual(node.name, expanded, "vscode-colored")
+        : resolveFileVisual(node.name, "vscode-colored");
+      const isRenamingNode = treeInlineEdit?.mode === "rename" && isSamePath(treeInlineEdit.targetPath, node.path);
 
-      return (
-        <div key={node.path}>
-          <button
-            type="button"
-            className={`tree-item ${activeTab?.path === node.path ? "active" : ""} ${
-              selected ? "selected" : ""
-            } ${isDropTarget ? "drop-target" : ""}`}
-            style={{ paddingLeft: `${6 + depth * 11}px` }}
-            disabled={loading || openingFile}
-            draggable={!loading && !openingFile}
-            onContextMenu={(event) => openTreeContextMenu(event, node.path, node.kind)}
-            onDragStart={(event) => handleTreeDragStart(event, { path: node.path, kind: node.kind })}
-            onDragEnd={handleTreeDragEnd}
-            onDragOver={isDirectory ? (event) => handleTreeDragOver(event, node.path) : undefined}
-            onDragLeave={isDirectory ? (event) => handleTreeDragLeave(event, node.path) : undefined}
-            onDrop={isDirectory ? (event) => handleTreeDrop(event, node.path) : undefined}
-            onClick={() => {
-              setSelectedTreePath(node.path);
-              setSelectedTreeKind(node.kind);
-              closeTreeContextMenu();
+      elements.push(
+        <div
+          key={node.path}
+          data-tree-drop-path={isDirectory ? node.path : undefined}
+        >
+          {isRenamingNode
+            ? renderTreeInlineEditor(treeInlineEdit, depth, node.kind)
+            : (
+              <button
+                type="button"
+                className={`tree-item ${activeTab?.path === node.path ? "active" : ""} ${
+                  selected ? "selected" : ""
+                } ${isDraggingSource ? "dragging-source" : ""} ${
+                  isValidDropTarget ? "drop-target-valid drop-target" : ""
+                } ${isInvalidDropTarget ? "drop-target-invalid" : ""}`}
+                style={{ paddingLeft: `${6 + depth * 11}px` }}
+                disabled={loading || openingFile}
+                onPointerDown={(event) => handleTreePointerDown(event, { path: node.path, kind: node.kind })}
+                onContextMenu={(event) => openTreeContextMenu(event, node.path, node.kind)}
+                onClick={() => {
+                  if (consumeTreeDragClickSuppression()) {
+                    return;
+                  }
 
-              if (isDirectory) {
-                const nextExpanded = !expanded;
-                setExpandedByPath((previous) => ({
-                  ...previous,
-                  [node.path]: nextExpanded,
-                }));
+                  setSelectedTreePath(node.path);
+                  setSelectedTreeKind(node.kind);
+                  closeTreeContextMenu();
 
-                if (nextExpanded && !treeByPath[node.path]) {
-                  void loadDirectory(node.path);
-                }
-                return;
-              }
+                  if (isDirectory) {
+                    const nextExpanded = !expanded;
+                    setExpandedByPath((previous) => ({
+                      ...previous,
+                      [node.path]: nextExpanded,
+                    }));
 
-              void openFile(node.path);
-            }}
-          >
-            <span className={`tree-marker tone-${visual.tone}`}>{visual.icon}</span>
-            <span className="tree-label">{node.name}</span>
-            {isDirectory && loading ? <span className="tree-loading">loading...</span> : null}
-            {openingFile ? <span className="tree-loading">opening...</span> : null}
-          </button>
+                    if (nextExpanded && !treeByPath[node.path]) {
+                      void loadDirectory(node.path);
+                    }
+                    return;
+                  }
 
-          {isDirectory && expanded && treeByPath[node.path]
-            ? renderTree(treeByPath[node.path], depth + 1)
+                  void openFile(node.path);
+                }}
+              >
+                <span className={`tree-marker tone-${visual.tone}`}>{visual.icon}</span>
+                <span className="tree-label">{node.name}</span>
+                {isDirectory && loading ? <span className="tree-loading">loading...</span> : null}
+                {openingFile ? <span className="tree-loading">opening...</span> : null}
+              </button>
+            )}
+
+          {isDirectory && expanded
+            ? renderTree(treeByPath[node.path] ?? [], depth + 1, node.path)
             : null}
-        </div>
+        </div>,
       );
-    });
+    }
+
+    return elements;
   }
 
   useEffect(() => {
@@ -2571,11 +2494,11 @@ function App() {
       cursorBlink: true,
       cursorStyle: "block",
       fontFamily: CODE_FONT_FAMILY,
-      fontSize: CODE_FONT_SIZE,
-      lineHeight: CODE_LINE_HEIGHT_RATIO,
+      fontSize: fontSize,
+      lineHeight: TERMINAL_LINE_HEIGHT_RATIO,
       allowTransparency: true,
       rightClickSelectsWord: true,
-      theme: activeColorTheme.terminalTheme,
+      theme: DEFAULT_TERMINAL_THEME,
       scrollback: 20000,
     });
 
@@ -2832,11 +2755,17 @@ function App() {
   const rootSelected = workspace && selectedTreePath
     ? isSamePath(selectedTreePath, workspace.rootPath)
     : false;
-  const rootDropTarget = workspace && treeDropTargetPath
-    ? isSamePath(treeDropTargetPath, workspace.rootPath)
+  const rootValidDropTarget = workspace && treeDnDState.dropTargetPath
+    ? isSamePath(treeDnDState.dropTargetPath, workspace.rootPath)
+    : false;
+  const rootInvalidDropTarget = workspace && treeDnDState.invalidDropTargetPath
+    ? isSamePath(treeDnDState.invalidDropTargetPath, workspace.rootPath)
+    : false;
+  const rootDraggingSource = workspace && treeDnDState.dragSourcePath
+    ? isSamePath(treeDnDState.dragSourcePath, workspace.rootPath)
     : false;
   const rootVisual = workspace
-    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, activeFileIconThemeId, true)
+    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, "vscode-colored", true)
     : null;
   const contextMenuOnRoot = workspace && treeContextMenu
     ? isSamePath(treeContextMenu.path, workspace.rootPath)
@@ -2914,95 +2843,41 @@ function App() {
             ) : null}
           </div>
 
-          <div
-            className={`header-menu ${activeHeaderMenuId === "view" ? "active" : ""}`}
-            onMouseEnter={() => openHeaderMenu("view")}
-          >
+          <div className="titlebar-actions" style={{ display: "flex", alignItems: "center", gap: "4px", marginLeft: "auto" }}>
             <button
               type="button"
               className="menu-tab"
-              title="视图"
-              aria-label="视图"
-              aria-haspopup="menu"
-              aria-expanded={activeHeaderMenuId === "view"}
-              onClick={() => toggleHeaderMenu("view")}
+              title={`减小字体 (${fontSize}px)`}
+              aria-label="减小字体"
+              onClick={() => adjustFontSize(-1)}
+              disabled={fontSize <= MIN_FONT_SIZE}
+              style={{ width: "38px", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
+            >
+              <AArrowDown size={14} aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              className="menu-tab"
+              title={`增大字体 (${fontSize}px)`}
+              aria-label="增大字体"
+              onClick={() => adjustFontSize(1)}
+              disabled={fontSize >= MAX_FONT_SIZE}
+              style={{ width: "38px", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
+            >
+              <AArrowUp size={14} aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              className="menu-tab"
+              title={isExplorerVisible ? "隐藏文件树" : "显示文件树"}
+              aria-label="切换文件树"
+              onClick={() => toggleExplorerVisibility()}
+              style={{ width: "38px", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
             >
               <FolderSearch size={14} aria-hidden="true" />
             </button>
-            {activeHeaderMenuId === "view" ? (
-              <div className="menu-panel" role="menu" aria-label="视图菜单">
-                <button
-                  type="button"
-                  className={`menu-item ${isExplorerVisible ? "selected" : ""}`}
-                  role="menuitem"
-                  onClick={() => runHeaderMenuAction(toggleExplorerVisibility)}
-                >
-                  <span className="menu-item-main">
-                    <span className={`menu-item-indicator ${isExplorerVisible ? "selected" : ""}`} aria-hidden="true" />
-                    <span className="menu-item-label">显示文件树</span>
-                  </span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-
-          <div
-            className={`header-menu ${activeHeaderMenuId === "theme" ? "active" : ""}`}
-            onMouseEnter={() => openHeaderMenu("theme")}
-          >
-            <button
-              type="button"
-              className="menu-tab"
-              title="主题"
-              aria-label="主题"
-              aria-haspopup="menu"
-              aria-expanded={activeHeaderMenuId === "theme"}
-              onClick={() => toggleHeaderMenu("theme")}
-            >
-              <FileCog size={14} aria-hidden="true" />
-            </button>
-            {activeHeaderMenuId === "theme" ? (
-              <div className="menu-panel menu-panel-theme" role="menu" aria-label="主题菜单">
-                <p className="menu-section-title">颜色主题</p>
-                {colorThemeOptions.map((theme) => {
-                  const isSelected = activeColorThemeId === theme.id;
-                  return (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      className={`menu-item ${isSelected ? "selected" : ""}`}
-                      role="menuitem"
-                      onClick={() => runHeaderMenuAction(() => setActiveColorThemeId(theme.id))}
-                    >
-                      <span className="menu-item-main">
-                        <span className={`menu-item-indicator ${isSelected ? "selected" : ""}`} aria-hidden="true" />
-                        <span className="menu-item-label">{theme.label}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-
-                <div className="menu-divider" />
-                <p className="menu-section-title">文件图标</p>
-                {fileIconThemeOptions.map((theme) => {
-                  const isSelected = activeFileIconThemeId === theme.id;
-                  return (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      className={`menu-item ${isSelected ? "selected" : ""}`}
-                      role="menuitem"
-                      onClick={() => runHeaderMenuAction(() => setActiveFileIconThemeId(theme.id))}
-                    >
-                      <span className="menu-item-main">
-                        <span className={`menu-item-indicator ${isSelected ? "selected" : ""}`} aria-hidden="true" />
-                        <span className="menu-item-label">{theme.label}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
           </div>
         </div>
 
@@ -3065,37 +2940,46 @@ function App() {
 
           {workspace ? (
             <div className="explorer-root">
-              <button
-                type="button"
-                className={`tree-item root ${rootSelected ? "selected" : ""} ${
-                  rootDropTarget ? "drop-target" : ""
-                }`}
-                onContextMenu={(event) => openTreeContextMenu(event, workspace.rootPath, "directory")}
-                onDragOver={(event) => handleTreeDragOver(event, workspace.rootPath)}
-                onDragLeave={(event) => handleTreeDragLeave(event, workspace.rootPath)}
-                onDrop={(event) => handleTreeDrop(event, workspace.rootPath)}
-                onClick={() => {
-                  setSelectedTreePath(workspace.rootPath);
-                  setSelectedTreeKind("directory");
-                  closeTreeContextMenu();
-
-                  const expanded = !rootExpanded;
-                  setExpandedByPath((previous) => ({
-                    ...previous,
-                    [workspace.rootPath]: expanded,
-                  }));
-                  if (expanded && !treeByPath[workspace.rootPath]) {
-                    void loadDirectory(workspace.rootPath);
-                  }
-                }}
+              <div
+                data-tree-drop-path={workspace.rootPath}
               >
-                <span className={`tree-marker tone-${rootVisual?.tone ?? "default"}`}>
-                  {rootVisual?.icon ?? <Folder size={14} />}
-                </span>
-                <span className="tree-label">{workspace.rootName}</span>
-              </button>
+                <button
+                  type="button"
+                  className={`tree-item root ${rootSelected ? "selected" : ""} ${
+                    rootDraggingSource ? "dragging-source" : ""
+                  } ${rootValidDropTarget ? "drop-target-valid drop-target" : ""} ${
+                    rootInvalidDropTarget ? "drop-target-invalid" : ""
+                  }`}
+                  onPointerDown={(event) =>
+                    handleTreePointerDown(event, { path: workspace.rootPath, kind: "directory" })}
+                  onContextMenu={(event) => openTreeContextMenu(event, workspace.rootPath, "directory")}
+                  onClick={() => {
+                    if (consumeTreeDragClickSuppression()) {
+                      return;
+                    }
+
+                    setSelectedTreePath(workspace.rootPath);
+                    setSelectedTreeKind("directory");
+                    closeTreeContextMenu();
+
+                    const expanded = !rootExpanded;
+                    setExpandedByPath((previous) => ({
+                      ...previous,
+                      [workspace.rootPath]: expanded,
+                    }));
+                    if (expanded && !treeByPath[workspace.rootPath]) {
+                      void loadDirectory(workspace.rootPath);
+                    }
+                  }}
+                >
+                  <span className={`tree-marker tone-${rootVisual?.tone ?? "default"}`}>
+                    {rootVisual?.icon ?? <Folder size={14} />}
+                  </span>
+                  <span className="tree-label">{workspace.rootName}</span>
+                </button>
+              </div>
               {rootExpanded ? (
-                <div>{renderTree(treeByPath[workspace.rootPath] ?? [], 1)}</div>
+                <div>{renderTree(treeByPath[workspace.rootPath] ?? [], 1, workspace.rootPath)}</div>
               ) : null}
             </div>
           ) : (
@@ -3249,15 +3133,15 @@ function App() {
                   value={activeTab.content}
                   onMount={handleEditorMount}
                   onChange={(value) => updateActiveTabContent(value ?? "")}
-                  theme={activeColorTheme.monacoThemeName}
+                  theme="vexc-one-dark-pro-orange"
                   className="editor-monaco"
                   height="100%"
                   options={{
                     automaticLayout: true,
                     minimap: { enabled: false },
                     fontFamily: CODE_FONT_FAMILY,
-                    fontSize: CODE_FONT_SIZE,
-                    lineHeight: CODE_LINE_HEIGHT,
+                    fontSize: fontSize,
+                    lineHeight: Math.round(fontSize * CODE_LINE_HEIGHT_RATIO),
                     tabSize: 2,
                     insertSpaces: true,
                     wordWrap: "on",
@@ -3281,59 +3165,6 @@ function App() {
         </section>
       </div>
 
-      <footer className="statusbar">
-        <div className="statusbar-section statusbar-left">
-          <span className="statusbar-icon" aria-hidden="true">
-            <Info size={13} />
-          </span>
-          <span>{statusMessage || "Ready"}</span>
-        </div>
-
-        <div className="statusbar-section statusbar-center">
-          <span className="statusbar-path">{contextPath || workspace?.rootPath || "No workspace"}</span>
-        </div>
-
-        <div className="statusbar-section statusbar-right">
-          <span
-            className="statusbar-chip"
-            title={activeWorkbenchTabKind === "terminal" ? "终端模式" : "编辑模式"}
-            aria-label={activeWorkbenchTabKind === "terminal" ? "终端模式" : "编辑模式"}
-          >
-            {activeWorkbenchTabKind === "terminal" ? (
-              <FileTerminal size={12} aria-hidden="true" />
-            ) : (
-              <FileCode size={12} aria-hidden="true" />
-            )}
-          </span>
-          {activeTab ? (
-            <span className="statusbar-chip" title={activeTab.language} aria-label={activeTab.language}>
-              <File size={12} aria-hidden="true" />
-            </span>
-          ) : null}
-          {activeTab ? (
-            <span
-              className={`statusbar-chip ${activeTabDirty ? "warning" : ""}`}
-              title={activeTabDirty ? "未保存" : "已保存"}
-              aria-label={activeTabDirty ? "未保存" : "已保存"}
-            >
-              {activeTabDirty ? (
-                <FilePenLine size={12} aria-hidden="true" />
-              ) : (
-                <Save size={12} aria-hidden="true" />
-              )}
-            </span>
-          ) : null}
-          {activeWorkbenchTabKind === "terminal" && activeTerminal ? (
-            <span
-              className={`statusbar-chip ${activeTerminal.status === "running" ? "" : "warning"}`}
-              title={activeTerminal.status === "running" ? "终端运行中" : "终端已停止"}
-              aria-label={activeTerminal.status === "running" ? "终端运行中" : "终端已停止"}
-            >
-              <FileTerminal size={12} aria-hidden="true" />
-            </span>
-          ) : null}
-        </div>
-      </footer>
     </div>
   );
 }

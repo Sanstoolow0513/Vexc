@@ -26,6 +26,13 @@ export interface PathResult {
   path: string;
 }
 
+export type MovePathErrorCode =
+  | "MOVE_SOURCE_IS_ROOT"
+  | "MOVE_TARGET_NOT_DIRECTORY"
+  | "MOVE_TARGET_EXISTS"
+  | "MOVE_TARGET_INSIDE_SOURCE"
+  | "MOVE_IO_ERROR";
+
 export interface SearchHit {
   path: string;
   line: number;
