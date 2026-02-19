@@ -6,6 +6,12 @@ import type {
   AiRunResult,
   FileContent,
   FileNode,
+  GitBranchSnapshot,
+  GitChange,
+  GitCommandResult,
+  GitCommitResult,
+  GitDiffResult,
+  GitRepoStatus,
   PathResult,
   SaveResult,
   SearchHit,
@@ -105,6 +111,50 @@ export async function terminalClear(sessionId: string): Promise<TerminalSessionS
 
 export async function terminalClose(sessionId: string): Promise<Ack> {
   return invoke<Ack>("terminal_close", { sessionId });
+}
+
+export async function gitRepoStatus(): Promise<GitRepoStatus> {
+  return invoke<GitRepoStatus>("git_repo_status");
+}
+
+export async function gitChanges(): Promise<GitChange[]> {
+  return invoke<GitChange[]>("git_changes");
+}
+
+export async function gitStage(paths: string[]): Promise<Ack> {
+  return invoke<Ack>("git_stage", { paths });
+}
+
+export async function gitUnstage(paths: string[]): Promise<Ack> {
+  return invoke<Ack>("git_unstage", { paths });
+}
+
+export async function gitDiscard(paths: string[]): Promise<Ack> {
+  return invoke<Ack>("git_discard", { paths });
+}
+
+export async function gitCommit(message: string): Promise<GitCommitResult> {
+  return invoke<GitCommitResult>("git_commit", { message });
+}
+
+export async function gitBranches(): Promise<GitBranchSnapshot> {
+  return invoke<GitBranchSnapshot>("git_branches");
+}
+
+export async function gitCheckout(branch: string, create = false): Promise<Ack> {
+  return invoke<Ack>("git_checkout", { branch, create });
+}
+
+export async function gitPull(): Promise<GitCommandResult> {
+  return invoke<GitCommandResult>("git_pull");
+}
+
+export async function gitPush(): Promise<GitCommandResult> {
+  return invoke<GitCommandResult>("git_push");
+}
+
+export async function gitDiff(path: string, staged = false): Promise<GitDiffResult> {
+  return invoke<GitDiffResult>("git_diff", { path, staged });
 }
 
 export async function aiProviderSuggestions(): Promise<AiProviderSuggestion[]> {

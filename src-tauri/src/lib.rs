@@ -123,6 +123,72 @@ struct TerminalOutputEvent {
     is_error: bool,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitRepoStatus {
+    is_repo: bool,
+    branch: Option<String>,
+    upstream: Option<String>,
+    ahead: u32,
+    behind: u32,
+    has_changes: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitChange {
+    path: String,
+    old_path: Option<String>,
+    index_status: String,
+    worktree_status: String,
+    status_code: String,
+    staged: bool,
+    unstaged: bool,
+    untracked: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitBranchInfo {
+    name: String,
+    is_current: bool,
+    is_remote: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitBranchSnapshot {
+    current_branch: Option<String>,
+    branches: Vec<GitBranchInfo>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitCommandResult {
+    command: String,
+    args: Vec<String>,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    success: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitCommitResult {
+    summary: String,
+    commit_hash: Option<String>,
+    command_result: GitCommandResult,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitDiffResult {
+    path: String,
+    staged: bool,
+    diff: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Ack {
@@ -706,6 +772,220 @@ fn terminal_close(session_id: String, state: tauri::State<AppState>) -> Result<A
 }
 
 #[tauri::command]
+fn git_repo_status(state: tauri::State<AppState>) -> Result<GitRepoStatus, String> {
+    let root = get_workspace_root(&state)?;
+    let (status, _) = get_git_status_snapshot(&root)?;
+    Ok(status)
+}
+
+#[tauri::command]
+fn git_changes(state: tauri::State<AppState>) -> Result<Vec<GitChange>, String> {
+    let root = get_workspace_root(&state)?;
+    let (_, changes) = get_git_status_snapshot(&root)?;
+    Ok(changes)
+}
+
+#[tauri::command]
+fn git_stage(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Ack, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let normalized_paths = normalize_git_paths(&paths, &root)?;
+    let mut args = vec![String::from("add"), String::from("--")];
+    args.extend(normalized_paths.into_iter().map(|path| path.relative));
+
+    run_git_command_expect_success(&root, &args, "Failed to stage files")?;
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn git_unstage(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Ack, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let normalized_paths = normalize_git_paths(&paths, &root)?;
+    let mut args = vec![
+        String::from("restore"),
+        String::from("--staged"),
+        String::from("--"),
+    ];
+    args.extend(normalized_paths.into_iter().map(|path| path.relative));
+
+    run_git_command_expect_success(&root, &args, "Failed to unstage files")?;
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn git_discard(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Ack, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let normalized_paths = normalize_git_paths(&paths, &root)?;
+    for path in normalized_paths {
+        let restore_args = vec![
+            String::from("restore"),
+            String::from("--worktree"),
+            String::from("--"),
+            path.relative.clone(),
+        ];
+        let restore_result = run_git_command(&root, &restore_args)?;
+        if restore_result.success {
+            continue;
+        }
+
+        if is_restore_unknown_path_error(&restore_result) {
+            let clean_args = vec![
+                String::from("clean"),
+                String::from("-f"),
+                String::from("--"),
+                path.relative.clone(),
+            ];
+            run_git_command_expect_success(
+                &root,
+                &clean_args,
+                "Failed to discard untracked files",
+            )?;
+            continue;
+        }
+
+        return Err(format!(
+            "Failed to discard changes for {}: {}",
+            path.relative,
+            summarize_git_failure(&restore_result)
+        ));
+    }
+
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn git_commit(message: String, state: tauri::State<AppState>) -> Result<GitCommitResult, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let trimmed_message = message.trim();
+    if trimmed_message.is_empty() {
+        return Err(String::from("Commit message cannot be empty"));
+    }
+
+    let args = vec![
+        String::from("commit"),
+        String::from("-m"),
+        trimmed_message.to_string(),
+    ];
+    let command_result = run_git_command_expect_success(&root, &args, "Failed to create commit")?;
+    let summary = command_result
+        .stdout
+        .lines()
+        .next()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| String::from("Commit created"));
+
+    Ok(GitCommitResult {
+        summary,
+        commit_hash: extract_git_commit_hash(&command_result.stdout),
+        command_result,
+    })
+}
+
+#[tauri::command]
+fn git_branches(state: tauri::State<AppState>) -> Result<GitBranchSnapshot, String> {
+    let root = get_workspace_root(&state)?;
+    let (status, _) = get_git_status_snapshot(&root)?;
+    if !status.is_repo {
+        return Ok(GitBranchSnapshot {
+            current_branch: None,
+            branches: Vec::new(),
+        });
+    }
+
+    let args = vec![
+        String::from("branch"),
+        String::from("--all"),
+        String::from("--no-color"),
+    ];
+    let result = run_git_command_expect_success(&root, &args, "Failed to list git branches")?;
+    let current_branch = status.branch.clone();
+    let branches = parse_git_branches_output(&result.stdout, current_branch.as_deref());
+
+    Ok(GitBranchSnapshot {
+        current_branch,
+        branches,
+    })
+}
+
+#[tauri::command]
+fn git_checkout(
+    branch: String,
+    create: Option<bool>,
+    state: tauri::State<AppState>,
+) -> Result<Ack, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let branch_name = validate_git_branch_name(&branch)?;
+    let mut args = vec![String::from("checkout")];
+    if create.unwrap_or(false) {
+        args.push(String::from("-b"));
+    }
+    args.push(branch_name.to_string());
+
+    run_git_command_expect_success(&root, &args, "Failed to checkout branch")?;
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
+fn git_pull(state: tauri::State<AppState>) -> Result<GitCommandResult, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let args = vec![String::from("pull")];
+    run_git_command_expect_success(&root, &args, "Git pull failed")
+}
+
+#[tauri::command]
+fn git_push(state: tauri::State<AppState>) -> Result<GitCommandResult, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let args = vec![String::from("push")];
+    run_git_command_expect_success(&root, &args, "Git push failed")
+}
+
+#[tauri::command]
+fn git_diff(
+    path: String,
+    staged: Option<bool>,
+    state: tauri::State<AppState>,
+) -> Result<GitDiffResult, String> {
+    let root = get_workspace_root(&state)?;
+    ensure_workspace_is_git_repository(&root)?;
+
+    let normalized_paths = normalize_git_paths(&[path], &root)?;
+    let normalized_path = normalized_paths
+        .into_iter()
+        .next()
+        .ok_or_else(|| String::from("No path provided for diff"))?;
+    let is_staged = staged.unwrap_or(false);
+
+    let mut args = vec![String::from("diff")];
+    if is_staged {
+        args.push(String::from("--staged"));
+    }
+    args.push(String::from("--"));
+    args.push(normalized_path.relative.clone());
+
+    let command_result =
+        run_git_command_expect_success(&root, &args, "Failed to generate git diff")?;
+    Ok(GitDiffResult {
+        path: normalized_path.absolute.to_string_lossy().to_string(),
+        staged: is_staged,
+        diff: command_result.stdout,
+    })
+}
+
+#[tauri::command]
 fn ai_provider_suggestions() -> Vec<AiProviderSuggestion> {
     vec![
         AiProviderSuggestion {
@@ -984,6 +1264,372 @@ fn decode_terminal_output_chunk(pending_utf8_bytes: &mut Vec<u8>, chunk_bytes: &
     decoded
 }
 
+#[derive(Clone)]
+struct NormalizedGitPath {
+    absolute: PathBuf,
+    relative: String,
+}
+
+fn ensure_workspace_is_git_repository(root: &Path) -> Result<(), String> {
+    let (status, _) = get_git_status_snapshot(root)?;
+    if status.is_repo {
+        Ok(())
+    } else {
+        Err(String::from("Workspace is not a git repository"))
+    }
+}
+
+fn get_git_status_snapshot(root: &Path) -> Result<(GitRepoStatus, Vec<GitChange>), String> {
+    let args = vec![
+        String::from("-c"),
+        String::from("core.quotepath=false"),
+        String::from("status"),
+        String::from("--porcelain=v1"),
+        String::from("--branch"),
+    ];
+    let result = run_git_command(root, &args)?;
+    if !result.success {
+        let combined_output = format!("{}\n{}", result.stderr, result.stdout);
+        if is_not_git_repository_error(&combined_output) {
+            return Ok((
+                GitRepoStatus {
+                    is_repo: false,
+                    branch: None,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    has_changes: false,
+                },
+                Vec::new(),
+            ));
+        }
+
+        return Err(format!(
+            "Failed to read git status: {}",
+            summarize_git_failure(&result)
+        ));
+    }
+
+    Ok(parse_git_status_porcelain(&result.stdout, root))
+}
+
+fn run_git_command(root: &Path, args: &[String]) -> Result<GitCommandResult, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("Failed to run git command: {error}"))?;
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    Ok(GitCommandResult {
+        command: String::from("git"),
+        args: args.to_vec(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code,
+        success: output.status.success(),
+    })
+}
+
+fn run_git_command_expect_success(
+    root: &Path,
+    args: &[String],
+    context: &str,
+) -> Result<GitCommandResult, String> {
+    let result = run_git_command(root, args)?;
+    if result.success {
+        return Ok(result);
+    }
+
+    Err(format!("{context}: {}", summarize_git_failure(&result)))
+}
+
+fn summarize_git_failure(result: &GitCommandResult) -> String {
+    let stderr = result.stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+
+    let stdout = result.stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+
+    format!("command exited with code {}", result.exit_code)
+}
+
+fn is_not_git_repository_error(text: &str) -> bool {
+    let normalized = text.to_lowercase();
+    normalized.contains("not a git repository")
+}
+
+fn is_restore_unknown_path_error(result: &GitCommandResult) -> bool {
+    let text = format!("{}\n{}", result.stderr, result.stdout).to_lowercase();
+    text.contains("did not match any file")
+        || text.contains("pathspec")
+        || text.contains("could not resolve")
+}
+
+fn validate_git_branch_name(value: &str) -> Result<&str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("Branch name cannot be empty"));
+    }
+
+    if trimmed.starts_with('-') {
+        return Err(String::from("Branch name cannot start with '-'"));
+    }
+
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(String::from("Branch name is not valid"));
+    }
+
+    Ok(trimmed)
+}
+
+fn normalize_git_paths(paths: &[String], root: &Path) -> Result<Vec<NormalizedGitPath>, String> {
+    if paths.is_empty() {
+        return Err(String::from("No paths provided"));
+    }
+
+    let mut normalized_paths = Vec::with_capacity(paths.len());
+    for raw_path in paths {
+        let trimmed_path = raw_path.trim();
+        if trimmed_path.is_empty() {
+            return Err(String::from("Path cannot be empty"));
+        }
+
+        let absolute_path = resolve_write_workspace_path(trimmed_path, root)?;
+        if absolute_path == root {
+            return Err(String::from("Git path cannot be workspace root"));
+        }
+
+        let relative_path = absolute_path
+            .strip_prefix(root)
+            .map_err(|_| String::from("Path is outside workspace boundary"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative_path.is_empty() {
+            return Err(String::from("Git path cannot be workspace root"));
+        }
+
+        normalized_paths.push(NormalizedGitPath {
+            absolute: absolute_path,
+            relative: relative_path,
+        });
+    }
+
+    Ok(normalized_paths)
+}
+
+fn parse_git_status_porcelain(output: &str, root: &Path) -> (GitRepoStatus, Vec<GitChange>) {
+    let mut status = GitRepoStatus {
+        is_repo: true,
+        branch: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        has_changes: false,
+    };
+    let mut changes = Vec::new();
+
+    for raw_line in output.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.starts_with("## ") {
+            parse_git_branch_header(line, &mut status);
+            continue;
+        }
+
+        if let Some(change) = parse_git_change_line(line, root) {
+            changes.push(change);
+        }
+    }
+
+    status.has_changes = !changes.is_empty();
+    (status, changes)
+}
+
+fn parse_git_branch_header(line: &str, status: &mut GitRepoStatus) {
+    let mut content = line.trim_start_matches("## ").trim();
+
+    if let Some(bracket_start) = content.rfind(" [") {
+        if content.ends_with(']') {
+            let details = &content[(bracket_start + 2)..(content.len() - 1)];
+            for token in details.split(',') {
+                let trimmed = token.trim();
+                if let Some(value) = trimmed.strip_prefix("ahead ") {
+                    status.ahead = value.parse::<u32>().unwrap_or(0);
+                } else if let Some(value) = trimmed.strip_prefix("behind ") {
+                    status.behind = value.parse::<u32>().unwrap_or(0);
+                }
+            }
+            content = &content[..bracket_start];
+        }
+    }
+
+    if let Some((branch, upstream)) = content.split_once("...") {
+        status.branch = parse_git_branch_name(branch);
+        let upstream_name = upstream.trim();
+        status.upstream = if upstream_name.is_empty() {
+            None
+        } else {
+            Some(upstream_name.to_string())
+        };
+        return;
+    }
+
+    status.branch = parse_git_branch_name(content);
+    status.upstream = None;
+}
+
+fn parse_git_branch_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(branch) = trimmed.strip_prefix("No commits yet on ") {
+        let branch_name = branch.trim();
+        return if branch_name.is_empty() {
+            None
+        } else {
+            Some(branch_name.to_string())
+        };
+    }
+
+    if trimmed == "HEAD (no branch)" {
+        return Some(String::from("HEAD"));
+    }
+
+    let branch_candidate = trimmed.split(' ').next().unwrap_or(trimmed).trim();
+    if branch_candidate.is_empty() {
+        None
+    } else {
+        Some(branch_candidate.to_string())
+    }
+}
+
+fn parse_git_change_line(line: &str, root: &Path) -> Option<GitChange> {
+    let mut chars = line.chars();
+    let index_status = chars.next()?;
+    let worktree_status = chars.next()?;
+    let separator = chars.next()?;
+    if separator != ' ' {
+        return None;
+    }
+
+    let payload = chars.as_str().trim();
+    if payload.is_empty() {
+        return None;
+    }
+
+    let (old_path_relative, path_relative) =
+        if let Some((old_path, new_path)) = payload.split_once(" -> ") {
+            (Some(old_path.trim()), new_path.trim())
+        } else {
+            (None, payload)
+        };
+    if path_relative.is_empty() {
+        return None;
+    }
+
+    let absolute_path = normalize_windows_verbatim_path(root.join(path_relative))
+        .to_string_lossy()
+        .to_string();
+    let absolute_old_path = old_path_relative.map(|value| {
+        normalize_windows_verbatim_path(root.join(value))
+            .to_string_lossy()
+            .to_string()
+    });
+    let untracked = index_status == '?' && worktree_status == '?';
+
+    Some(GitChange {
+        path: absolute_path,
+        old_path: absolute_old_path,
+        index_status: index_status.to_string(),
+        worktree_status: worktree_status.to_string(),
+        status_code: format!("{index_status}{worktree_status}"),
+        staged: index_status != ' ' && index_status != '?',
+        unstaged: worktree_status != ' ',
+        untracked,
+    })
+}
+
+fn parse_git_branches_output(output: &str, current_branch: Option<&str>) -> Vec<GitBranchInfo> {
+    let mut branches = Vec::new();
+    for raw_line in output.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let is_current_marker = trimmed.starts_with('*');
+        let mut branch_name = if is_current_marker {
+            trimmed.trim_start_matches('*').trim()
+        } else {
+            trimmed
+        };
+        if branch_name.contains(" -> ") {
+            continue;
+        }
+
+        let is_remote = branch_name.starts_with("remotes/");
+        if is_remote {
+            branch_name = branch_name.trim_start_matches("remotes/");
+        }
+
+        let branch_name = branch_name.trim();
+        if branch_name.is_empty() {
+            continue;
+        }
+
+        let is_current = current_branch
+            .map(|value| value == branch_name)
+            .unwrap_or(false)
+            || is_current_marker;
+        if branches
+            .iter()
+            .any(|item: &GitBranchInfo| item.name == branch_name && item.is_remote == is_remote)
+        {
+            continue;
+        }
+
+        branches.push(GitBranchInfo {
+            name: branch_name.to_string(),
+            is_current,
+            is_remote,
+        });
+    }
+
+    branches.sort_by(|left, right| match (left.is_remote, right.is_remote) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+    });
+    branches
+}
+
+fn extract_git_commit_hash(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('[') {
+            continue;
+        }
+
+        let closing = trimmed.find(']')?;
+        let payload = &trimmed[1..closing];
+        let mut segments = payload.split_whitespace();
+        let _branch = segments.next();
+        let hash = segments.next()?;
+        if hash.chars().all(|value| value.is_ascii_hexdigit()) {
+            return Some(hash.to_string());
+        }
+    }
+
+    None
+}
+
 fn search_directory(
     directory: &Path,
     query_lower: &str,
@@ -1204,6 +1850,103 @@ fn is_probably_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(1024).any(|value| *value == 0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{normalize_git_paths, parse_git_branches_output, parse_git_status_porcelain};
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_temp_directory_name(prefix: &str) -> String {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        format!("{prefix}-{timestamp}")
+    }
+
+    #[test]
+    fn parse_git_status_reads_branch_and_changes() {
+        let root = Path::new("/workspace");
+        let output = "\
+## main...origin/main [ahead 2, behind 1]
+M  src/lib.rs
+ M README.md
+R  old.txt -> new.txt
+?? notes.txt
+";
+
+        let (status, changes) = parse_git_status_porcelain(output, root);
+        assert!(status.is_repo);
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!(status.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(status.ahead, 2);
+        assert_eq!(status.behind, 1);
+        assert!(status.has_changes);
+        assert_eq!(changes.len(), 4);
+
+        let rename_change = changes
+            .iter()
+            .find(|change| change.status_code == "R ")
+            .expect("rename change should exist");
+        assert!(rename_change.staged);
+        assert!(rename_change
+            .old_path
+            .as_deref()
+            .map(|path| path.ends_with("old.txt"))
+            .unwrap_or(false));
+        assert!(rename_change.path.ends_with("new.txt"));
+
+        let untracked_change = changes
+            .iter()
+            .find(|change| change.untracked)
+            .expect("untracked change should exist");
+        assert!(!untracked_change.staged);
+        assert!(untracked_change.unstaged);
+    }
+
+    #[test]
+    fn parse_git_branches_marks_local_and_remote() {
+        let output = "\
+* main
+  feature/ui
+  remotes/origin/main
+  remotes/origin/feature/ui
+  remotes/origin/HEAD -> origin/main
+";
+
+        let branches = parse_git_branches_output(output, Some("main"));
+        assert_eq!(branches.len(), 4);
+
+        let main_branch = branches
+            .iter()
+            .find(|branch| branch.name == "main" && !branch.is_remote)
+            .expect("local main branch should exist");
+        assert!(main_branch.is_current);
+
+        let remote_main = branches
+            .iter()
+            .find(|branch| branch.name == "origin/main" && branch.is_remote)
+            .expect("remote main branch should exist");
+        assert!(!remote_main.is_current);
+    }
+
+    #[test]
+    fn normalize_git_paths_rejects_workspace_root() {
+        let temp_root =
+            std::env::temp_dir().join(unique_temp_directory_name("vexc-normalize-git-paths"));
+        fs::create_dir_all(&temp_root).expect("temporary root should be created");
+        let root_string = temp_root.to_string_lossy().to_string();
+
+        let result = normalize_git_paths(&[root_string], &temp_root);
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1229,6 +1972,17 @@ pub fn run() {
             terminal_resize,
             terminal_clear,
             terminal_close,
+            git_repo_status,
+            git_changes,
+            git_stage,
+            git_unstage,
+            git_discard,
+            git_commit,
+            git_branches,
+            git_checkout,
+            git_pull,
+            git_push,
+            git_diff,
             ai_provider_suggestions,
             ai_run
         ])

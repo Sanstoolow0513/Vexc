@@ -70,6 +70,72 @@ export interface TerminalOutputEvent {
   isError: boolean;
 }
 
+export type GitFileStatusCode =
+  | "M"
+  | "A"
+  | "D"
+  | "R"
+  | "C"
+  | "T"
+  | "U"
+  | "?"
+  | "!"
+  | "??"
+  | "!!"
+  | " ";
+
+export interface GitChange {
+  path: string;
+  oldPath: string | null;
+  indexStatus: GitFileStatusCode;
+  worktreeStatus: GitFileStatusCode;
+  statusCode: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface GitRepoStatus {
+  isRepo: boolean;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  hasChanges: boolean;
+}
+
+export interface GitBranchInfo {
+  name: string;
+  isCurrent: boolean;
+  isRemote: boolean;
+}
+
+export interface GitBranchSnapshot {
+  currentBranch: string | null;
+  branches: GitBranchInfo[];
+}
+
+export interface GitCommandResult {
+  command: string;
+  args: string[];
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  success: boolean;
+}
+
+export interface GitCommitResult {
+  summary: string;
+  commitHash: string | null;
+  commandResult: GitCommandResult;
+}
+
+export interface GitDiffResult {
+  path: string;
+  staged: boolean;
+  diff: string;
+}
+
 export interface Ack {
   ok: boolean;
 }

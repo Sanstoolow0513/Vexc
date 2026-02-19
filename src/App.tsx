@@ -54,6 +54,17 @@ import {
   createDirectory,
   createFile,
   deletePath,
+  gitBranches,
+  gitCheckout,
+  gitCommit,
+  gitDiff,
+  gitDiscard,
+  gitPull,
+  gitPush,
+  gitRepoStatus,
+  gitStage,
+  gitUnstage,
+  gitChanges as listGitChanges,
   getWorkspace,
   listDirectory,
   movePath,
@@ -72,6 +83,10 @@ import type {
   EditorTab,
   FileKind,
   FileNode,
+  GitBranchSnapshot,
+  GitChange,
+  GitCommitResult,
+  GitRepoStatus,
   MovePathErrorCode,
   TerminalOutputEvent,
   TerminalSession,
@@ -119,45 +134,45 @@ const DEFAULT_MONACO_THEME: MonacoEditor.IStandaloneThemeData = {
   base: "vs-dark",
   inherit: true,
   rules: [
-    { token: "keyword", foreground: "c678dd" },
-    { token: "variable", foreground: "e06c75" },
-    { token: "string", foreground: "98c379" },
-    { token: "function", foreground: "61afef" },
-    { token: "number", foreground: "d19a66" },
-    { token: "comment", foreground: "5c6370", fontStyle: "italic" },
-    { token: "type", foreground: "e5c07b" },
+    { token: "keyword", foreground: "d9a46a" },
+    { token: "variable", foreground: "e3c9ac" },
+    { token: "string", foreground: "a7c08a" },
+    { token: "function", foreground: "8fb7d8" },
+    { token: "number", foreground: "d08d5b" },
+    { token: "comment", foreground: "7f6c59", fontStyle: "italic" },
+    { token: "type", foreground: "d9b77d" },
   ],
   colors: {
-    "editor.background": "#0a0c10",
-    "editor.foreground": "#abb2bf",
-    "editorCursor.foreground": "#d19a66",
-    "editor.lineHighlightBackground": "#13161c",
-    "editor.selectionBackground": "#2c313a",
-    "editor.inactiveSelectionBackground": "#1c1f26",
+    "editor.background": "#13100d",
+    "editor.foreground": "#e3d6c7",
+    "editorCursor.foreground": "#cb8e50",
+    "editor.lineHighlightBackground": "#1f1812",
+    "editor.selectionBackground": "#3a2a1b",
+    "editor.inactiveSelectionBackground": "#2a2017",
   },
 };
 
 const DEFAULT_TERMINAL_THEME: ITheme = {
-  background: "#000000",
-  foreground: "#abb2bf",
-  cursor: "#d19a66",
-  selectionBackground: "rgba(209, 154, 102, 0.2)",
-  black: "#000000",
-  red: "#e06c75",
-  green: "#98c379",
-  yellow: "#e5c07b",
-  blue: "#61afef",
-  magenta: "#c678dd",
-  cyan: "#56b6c2",
-  white: "#abb2bf",
-  brightBlack: "#4b5263",
-  brightRed: "#e06c75",
-  brightGreen: "#98c379",
-  brightYellow: "#e5c07b",
-  brightBlue: "#61afef",
-  brightMagenta: "#c678dd",
-  brightCyan: "#56b6c2",
-  brightWhite: "#abb2bf",
+  background: "#100d0a",
+  foreground: "#e3d6c7",
+  cursor: "#cb8e50",
+  selectionBackground: "rgba(203, 142, 80, 0.24)",
+  black: "#100d0a",
+  red: "#e07a76",
+  green: "#8fc58a",
+  yellow: "#d9b77d",
+  blue: "#8fb7d8",
+  magenta: "#c79874",
+  cyan: "#7fb3a4",
+  white: "#e3d6c7",
+  brightBlack: "#6f5d4b",
+  brightRed: "#ef9a95",
+  brightGreen: "#a9d6a3",
+  brightYellow: "#e6c99a",
+  brightBlue: "#aac7de",
+  brightMagenta: "#ddb091",
+  brightCyan: "#9cc9bd",
+  brightWhite: "#f4eadf",
 };
 
 function readStoredFontSize(): number {
@@ -173,6 +188,7 @@ interface PendingPosition {
 }
 
 type WorkbenchTabKind = "file" | "terminal";
+type SidebarView = "explorer" | "scm";
 
 interface WorkbenchTabTarget {
   kind: WorkbenchTabKind;
@@ -369,6 +385,41 @@ function toDropValidationResult(reason: TreeDropRejectionReason | null): DropVal
   }
 
   return { ok: false, reason };
+}
+
+function relativePathWithinWorkspace(path: string, workspaceRootPath: string): string {
+  if (!isSameOrDescendantPath(path, workspaceRootPath)) {
+    return fileNameFromPath(path);
+  }
+
+  let suffix = path.slice(workspaceRootPath.length);
+  suffix = suffix.replace(/^[\\/]+/, "");
+  return suffix || fileNameFromPath(path);
+}
+
+function labelForGitChange(change: GitChange): string {
+  if (change.untracked) {
+    return "U";
+  }
+
+  const code = change.statusCode.trim();
+  if (code) {
+    return code;
+  }
+
+  return "M";
+}
+
+function summaryFromGitCommitResult(result: GitCommitResult): string {
+  if (result.summary.trim()) {
+    return result.summary.trim();
+  }
+
+  if (result.commitHash) {
+    return `Committed ${result.commitHash}`;
+  }
+
+  return "Commit created.";
 }
 
 type TreeIconTone =
@@ -869,6 +920,7 @@ function App() {
   const [isExplorerVisible, setIsExplorerVisible] = useState(true);
   const [explorerWidth, setExplorerWidth] = useState(EXPLORER_DEFAULT_WIDTH);
   const [isExplorerResizing, setIsExplorerResizing] = useState(false);
+  const [sidebarView, setSidebarView] = useState<SidebarView>("explorer");
   const [activeWorkbenchTabKind, setActiveWorkbenchTabKind] = useState<WorkbenchTabKind>("file");
   const [fontSize, setFontSize] = useState<number>(() => readStoredFontSize());
   const [activeHeaderMenuId, setActiveHeaderMenuId] = useState<HeaderMenuId | null>(null);
@@ -877,6 +929,18 @@ function App() {
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
   const [treeInlineEdit, setTreeInlineEdit] = useState<TreeInlineEditState | null>(null);
   const [isTreeInlineEditSubmitting, setIsTreeInlineEditSubmitting] = useState(false);
+  const [gitRepo, setGitRepo] = useState<GitRepoStatus | null>(null);
+  const [gitChangesState, setGitChangesState] = useState<GitChange[]>([]);
+  const [gitBranchState, setGitBranchState] = useState<GitBranchSnapshot>({
+    currentBranch: null,
+    branches: [],
+  });
+  const [gitCommitMessage, setGitCommitMessage] = useState("");
+  const [gitSelectedDiffPath, setGitSelectedDiffPath] = useState<string | null>(null);
+  const [gitSelectedDiffStaged, setGitSelectedDiffStaged] = useState(false);
+  const [gitDiffText, setGitDiffText] = useState("");
+  const [isGitRefreshing, setIsGitRefreshing] = useState(false);
+  const [gitLoadingByAction, setGitLoadingByAction] = useState<Record<string, boolean>>({});
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
 
@@ -1079,9 +1143,237 @@ function App() {
     () => tabs.some((tab) => tab.content !== tab.savedContent),
     [tabs],
   );
+  const gitStagedChanges = useMemo(
+    () => gitChangesState.filter((change) => change.staged),
+    [gitChangesState],
+  );
+  const gitUnstagedChanges = useMemo(
+    () => gitChangesState.filter((change) => change.unstaged && !change.untracked),
+    [gitChangesState],
+  );
+  const gitUntrackedChanges = useMemo(
+    () => gitChangesState.filter((change) => change.untracked),
+    [gitChangesState],
+  );
+  const isGitActionPending = useMemo(
+    () => Object.values(gitLoadingByAction).some((value) => value),
+    [gitLoadingByAction],
+  );
 
   function tabIsDirty(tab: EditorTab): boolean {
     return tab.content !== tab.savedContent;
+  }
+
+  function resetGitState(): void {
+    setGitRepo(null);
+    setGitChangesState([]);
+    setGitBranchState({
+      currentBranch: null,
+      branches: [],
+    });
+    setGitCommitMessage("");
+    setGitSelectedDiffPath(null);
+    setGitSelectedDiffStaged(false);
+    setGitDiffText("");
+  }
+
+  function setGitActionLoading(actionKey: string, loading: boolean): void {
+    setGitLoadingByAction((previous) => ({
+      ...previous,
+      [actionKey]: loading,
+    }));
+  }
+
+  async function refreshGitState(showErrors = true): Promise<void> {
+    if (!workspace) {
+      resetGitState();
+      return;
+    }
+
+    setIsGitRefreshing(true);
+    setGitActionLoading("refresh", true);
+    try {
+      const [repo, changes, branches] = await Promise.all([
+        gitRepoStatus(),
+        listGitChanges(),
+        gitBranches(),
+      ]);
+
+      setGitRepo(repo);
+      setGitChangesState(changes);
+      setGitBranchState(branches);
+
+      if (!repo.isRepo) {
+        setGitSelectedDiffPath(null);
+        setGitSelectedDiffStaged(false);
+        setGitDiffText("");
+        return;
+      }
+
+      if (
+        gitSelectedDiffPath
+        && !changes.some((change) => isSamePath(change.path, gitSelectedDiffPath))
+      ) {
+        setGitSelectedDiffPath(null);
+        setGitSelectedDiffStaged(false);
+        setGitDiffText("");
+      }
+    } catch (error) {
+      if (showErrors) {
+        setStatusMessage(`Failed to refresh Git state: ${String(error)}`);
+      }
+    } finally {
+      setIsGitRefreshing(false);
+      setGitActionLoading("refresh", false);
+    }
+  }
+
+  async function loadGitDiffPreview(path: string, staged: boolean): Promise<void> {
+    if (!workspace || !gitRepo?.isRepo) {
+      return;
+    }
+
+    setGitActionLoading("diff", true);
+    try {
+      const result = await gitDiff(path, staged);
+      setGitSelectedDiffPath(path);
+      setGitSelectedDiffStaged(staged);
+      setGitDiffText(result.diff || "No diff content for this file.");
+    } catch (error) {
+      setStatusMessage(`Failed to load diff: ${String(error)}`);
+    } finally {
+      setGitActionLoading("diff", false);
+    }
+  }
+
+  async function stageGitPaths(paths: string[]): Promise<void> {
+    if (paths.length === 0) {
+      return;
+    }
+
+    setGitActionLoading("stage", true);
+    try {
+      await gitStage(paths);
+      await refreshGitState(false);
+      if (gitSelectedDiffPath) {
+        await loadGitDiffPreview(gitSelectedDiffPath, gitSelectedDiffStaged);
+      }
+      setStatusMessage(`Staged ${paths.length} path(s).`);
+    } catch (error) {
+      setStatusMessage(`Failed to stage changes: ${String(error)}`);
+    } finally {
+      setGitActionLoading("stage", false);
+    }
+  }
+
+  async function unstageGitPaths(paths: string[]): Promise<void> {
+    if (paths.length === 0) {
+      return;
+    }
+
+    setGitActionLoading("unstage", true);
+    try {
+      await gitUnstage(paths);
+      await refreshGitState(false);
+      if (gitSelectedDiffPath) {
+        await loadGitDiffPreview(gitSelectedDiffPath, gitSelectedDiffStaged);
+      }
+      setStatusMessage(`Unstaged ${paths.length} path(s).`);
+    } catch (error) {
+      setStatusMessage(`Failed to unstage changes: ${String(error)}`);
+    } finally {
+      setGitActionLoading("unstage", false);
+    }
+  }
+
+  async function discardGitPaths(paths: string[]): Promise<void> {
+    if (paths.length === 0) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Discard changes for ${paths.length} path(s)? This cannot be undone.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setGitActionLoading("discard", true);
+    try {
+      await gitDiscard(paths);
+      await refreshGitState(false);
+      if (gitSelectedDiffPath) {
+        await loadGitDiffPreview(gitSelectedDiffPath, gitSelectedDiffStaged);
+      }
+      setStatusMessage(`Discarded ${paths.length} path(s).`);
+    } catch (error) {
+      setStatusMessage(`Failed to discard changes: ${String(error)}`);
+    } finally {
+      setGitActionLoading("discard", false);
+    }
+  }
+
+  async function handleGitCommitSubmit(): Promise<void> {
+    const message = gitCommitMessage.trim();
+    if (!message) {
+      setStatusMessage("Commit message cannot be empty.");
+      return;
+    }
+
+    setGitActionLoading("commit", true);
+    try {
+      const result = await gitCommit(message);
+      setGitCommitMessage("");
+      await refreshGitState(false);
+      setStatusMessage(summaryFromGitCommitResult(result));
+    } catch (error) {
+      setStatusMessage(`Commit failed: ${String(error)}`);
+    } finally {
+      setGitActionLoading("commit", false);
+    }
+  }
+
+  async function handleGitCheckoutBranch(branchName: string): Promise<void> {
+    if (!branchName || (gitBranchState.currentBranch && branchName === gitBranchState.currentBranch)) {
+      return;
+    }
+
+    setGitActionLoading("checkout", true);
+    try {
+      await gitCheckout(branchName, false);
+      await refreshGitState(false);
+      setStatusMessage(`Checked out ${branchName}.`);
+    } catch (error) {
+      setStatusMessage(`Failed to checkout branch: ${String(error)}`);
+    } finally {
+      setGitActionLoading("checkout", false);
+    }
+  }
+
+  async function handleGitPullAction(): Promise<void> {
+    setGitActionLoading("pull", true);
+    try {
+      const result = await gitPull();
+      await refreshGitState(false);
+      setStatusMessage(result.stdout.trim() || "Git pull completed.");
+    } catch (error) {
+      setStatusMessage(`Git pull failed: ${String(error)}`);
+    } finally {
+      setGitActionLoading("pull", false);
+    }
+  }
+
+  async function handleGitPushAction(): Promise<void> {
+    setGitActionLoading("push", true);
+    try {
+      const result = await gitPush();
+      await refreshGitState(false);
+      setStatusMessage(result.stdout.trim() || "Git push completed.");
+    } catch (error) {
+      setStatusMessage(`Git push failed: ${String(error)}`);
+    } finally {
+      setGitActionLoading("push", false);
+    }
   }
 
   function hideExplorerPanel(): void {
@@ -1497,6 +1789,7 @@ function App() {
         setSelectedTreePath(result.path);
         setSelectedTreeKind(treeInlineEdit.targetKind);
         setStatusMessage(`Renamed to ${fileNameFromPath(result.path)}`);
+        await refreshGitState(false);
         setTreeInlineEdit(null);
         return;
       }
@@ -1524,6 +1817,7 @@ function App() {
       }
 
       setStatusMessage(`Created ${label}: ${fileNameFromPath(result.path)}`);
+      await refreshGitState(false);
       setTreeInlineEdit(null);
     } catch (error) {
       if (treeInlineEdit.mode === "rename") {
@@ -1652,6 +1946,7 @@ function App() {
       const parentDirectoryPath = parentPath(path);
       refreshDirectoryEntries([parentDirectoryPath ?? ""]);
       setStatusMessage(`Deleted ${label}: ${fileNameFromPath(path)}`);
+      await refreshGitState(false);
     } catch (error) {
       setStatusMessage(`Delete failed: ${String(error)}`);
     }
@@ -1699,6 +1994,7 @@ function App() {
       setSelectedTreePath(result.path);
       setSelectedTreeKind(source.kind);
       setStatusMessage(`Moved: ${fileNameFromPath(source.path)} -> ${targetDirectoryPath}`);
+      await refreshGitState(false);
     } catch (error) {
       const errorCode = parseMovePathErrorCode(error);
       if (errorCode) {
@@ -1955,6 +2251,7 @@ function App() {
     try {
       const info = await setWorkspace(normalizedPath);
       setWorkspaceState(info);
+      resetGitState();
       localStorage.setItem(WORKSPACE_STORAGE_KEY, info.rootPath);
 
       setTabs([]);
@@ -2082,6 +2379,7 @@ function App() {
         ),
       );
       setStatusMessage(`Saved ${tab.title}`);
+      await refreshGitState(false);
     } catch (error) {
       setStatusMessage(`Save failed: ${String(error)}`);
     }
@@ -2280,10 +2578,12 @@ function App() {
       if (existingWorkspace) {
         await openWorkspaceByPath(existingWorkspace.rootPath, true);
       } else {
+        resetGitState();
         await clearAllTerminalSessions();
       }
     } catch (error) {
       setStatusMessage(`Bootstrap failed: ${String(error)}`);
+      resetGitState();
       await clearAllTerminalSessions();
     }
   }
@@ -2621,17 +2921,30 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!workspace) {
+      resetGitState();
+      return;
+    }
+
+    void refreshGitState(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.rootPath]);
+
+  useEffect(() => {
     void refreshWindowMaximizedState();
 
     const focusHandler = () => {
       void refreshWindowMaximizedState();
+      if (workspace) {
+        void refreshGitState(false);
+      }
     };
 
     window.addEventListener("focus", focusHandler);
     return () => {
       window.removeEventListener("focus", focusHandler);
     };
-  }, [appWindow]);
+  }, [appWindow, workspace]);
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
@@ -2915,141 +3228,462 @@ function App() {
 
       <div ref={workbenchGridRef} className={workbenchClassName} style={workbenchStyle}>
         <aside className="explorer-panel">
-          <div className="explorer-toolbar">
+          <div className="sidebar-mode-switch">
             <button
               type="button"
-              className="explorer-action icon-only"
-              title="新建文件"
-              aria-label="新建文件"
-              disabled={!workspace}
-              onClick={() => void promptCreateNode("file")}
+              className={`sidebar-mode-button ${sidebarView === "explorer" ? "active" : ""}`}
+              onClick={() => {
+                setSidebarView("explorer");
+                closeTreeContextMenu();
+              }}
             >
-              <FilePlus2 size={14} />
+              <FolderSearch size={14} />
+              <span>Files</span>
             </button>
             <button
               type="button"
-              className="explorer-action icon-only"
-              title="新建文件夹"
-              aria-label="新建文件夹"
-              disabled={!workspace}
-              onClick={() => void promptCreateNode("directory")}
+              className={`sidebar-mode-button ${sidebarView === "scm" ? "active" : ""}`}
+              onClick={() => {
+                setSidebarView("scm");
+                closeTreeContextMenu();
+              }}
             >
-              <FolderPlus size={14} />
+              <FolderGit2 size={14} />
+              <span>Source Control</span>
             </button>
           </div>
 
-          {workspace ? (
-            <div className="explorer-root">
-              <div
-                data-tree-drop-path={workspace.rootPath}
-              >
+          {sidebarView === "explorer" ? (
+            <>
+              <div className="explorer-toolbar">
                 <button
                   type="button"
-                  className={`tree-item root ${rootSelected ? "selected" : ""} ${
-                    rootDraggingSource ? "dragging-source" : ""
-                  } ${rootValidDropTarget ? "drop-target-valid drop-target" : ""} ${
-                    rootInvalidDropTarget ? "drop-target-invalid" : ""
-                  }`}
-                  onPointerDown={(event) =>
-                    handleTreePointerDown(event, { path: workspace.rootPath, kind: "directory" })}
-                  onContextMenu={(event) => openTreeContextMenu(event, workspace.rootPath, "directory")}
-                  onClick={() => {
-                    if (consumeTreeDragClickSuppression()) {
-                      return;
-                    }
-
-                    setSelectedTreePath(workspace.rootPath);
-                    setSelectedTreeKind("directory");
-                    closeTreeContextMenu();
-
-                    const expanded = !rootExpanded;
-                    setExpandedByPath((previous) => ({
-                      ...previous,
-                      [workspace.rootPath]: expanded,
-                    }));
-                    if (expanded && !treeByPath[workspace.rootPath]) {
-                      void loadDirectory(workspace.rootPath);
-                    }
-                  }}
+                  className="explorer-action icon-only"
+                  title="新建文件"
+                  aria-label="新建文件"
+                  disabled={!workspace}
+                  onClick={() => void promptCreateNode("file")}
                 >
-                  <span className={`tree-marker tone-${rootVisual?.tone ?? "default"}`}>
-                    {rootVisual?.icon ?? <Folder size={14} />}
-                  </span>
-                  <span className="tree-label">{workspace.rootName}</span>
+                  <FilePlus2 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="explorer-action icon-only"
+                  title="新建文件夹"
+                  aria-label="新建文件夹"
+                  disabled={!workspace}
+                  onClick={() => void promptCreateNode("directory")}
+                >
+                  <FolderPlus size={14} />
                 </button>
               </div>
-              {rootExpanded ? (
-                <div>{renderTree(treeByPath[workspace.rootPath] ?? [], 1, workspace.rootPath)}</div>
+
+              {workspace ? (
+                <div className="explorer-root">
+                  <div
+                    data-tree-drop-path={workspace.rootPath}
+                  >
+                    <button
+                      type="button"
+                      className={`tree-item root ${rootSelected ? "selected" : ""} ${
+                        rootDraggingSource ? "dragging-source" : ""
+                      } ${rootValidDropTarget ? "drop-target-valid drop-target" : ""} ${
+                        rootInvalidDropTarget ? "drop-target-invalid" : ""
+                      }`}
+                      onPointerDown={(event) =>
+                        handleTreePointerDown(event, { path: workspace.rootPath, kind: "directory" })}
+                      onContextMenu={(event) => openTreeContextMenu(event, workspace.rootPath, "directory")}
+                      onClick={() => {
+                        if (consumeTreeDragClickSuppression()) {
+                          return;
+                        }
+
+                        setSelectedTreePath(workspace.rootPath);
+                        setSelectedTreeKind("directory");
+                        closeTreeContextMenu();
+
+                        const expanded = !rootExpanded;
+                        setExpandedByPath((previous) => ({
+                          ...previous,
+                          [workspace.rootPath]: expanded,
+                        }));
+                        if (expanded && !treeByPath[workspace.rootPath]) {
+                          void loadDirectory(workspace.rootPath);
+                        }
+                      }}
+                    >
+                      <span className={`tree-marker tone-${rootVisual?.tone ?? "default"}`}>
+                        {rootVisual?.icon ?? <Folder size={14} />}
+                      </span>
+                      <span className="tree-label">{workspace.rootName}</span>
+                    </button>
+                  </div>
+                  {rootExpanded ? (
+                    <div>{renderTree(treeByPath[workspace.rootPath] ?? [], 1, workspace.rootPath)}</div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="empty-text">Open a workspace to browse files.</p>
+              )}
+
+              {treeContextMenu ? (
+                <div
+                  ref={treeContextMenuRef}
+                  className="tree-context-menu"
+                  role="menu"
+                  style={{ top: `${treeContextMenu.y}px`, left: `${treeContextMenu.x}px` }}
+                >
+                  {treeContextMenu.kind === "directory" ? (
+                    <>
+                      <button
+                        type="button"
+                        className="tree-context-item"
+                        role="menuitem"
+                        onClick={() =>
+                          runTreeContextAction(() =>
+                            promptCreateNode("file", treeContextMenu.path, treeContextMenu.kind),
+                          )}
+                      >
+                        <FilePlus2 size={14} />
+                        <span>新建文件</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="tree-context-item"
+                        role="menuitem"
+                        onClick={() =>
+                          runTreeContextAction(() =>
+                            promptCreateNode("directory", treeContextMenu.path, treeContextMenu.kind),
+                          )}
+                      >
+                        <FolderPlus size={14} />
+                        <span>新建文件夹</span>
+                      </button>
+                      {!contextMenuOnRoot ? <div className="tree-context-separator" /> : null}
+                    </>
+                  ) : null}
+
+                  {!contextMenuOnRoot ? (
+                    <button
+                      type="button"
+                      className="tree-context-item"
+                      role="menuitem"
+                      onClick={() =>
+                        runTreeContextAction(() => handleRenameTreePath(treeContextMenu.path, treeContextMenu.kind))}
+                    >
+                      <Pencil size={14} />
+                      <span>重命名</span>
+                    </button>
+                  ) : null}
+
+                  {!contextMenuOnRoot ? (
+                    <button
+                      type="button"
+                      className="tree-context-item danger"
+                      role="menuitem"
+                      onClick={() =>
+                        runTreeContextAction(() => handleDeleteTreePath(treeContextMenu.path, treeContextMenu.kind))}
+                    >
+                      <Trash2 size={14} />
+                      <span>删除</span>
+                    </button>
+                  ) : null}
+                </div>
               ) : null}
-            </div>
+            </>
           ) : (
-            <p className="empty-text">Open a workspace to browse files.</p>
-          )}
-
-          {treeContextMenu ? (
-            <div
-              ref={treeContextMenuRef}
-              className="tree-context-menu"
-              role="menu"
-              style={{ top: `${treeContextMenu.y}px`, left: `${treeContextMenu.x}px` }}
-            >
-              {treeContextMenu.kind === "directory" ? (
+            <div className="scm-panel">
+              {!workspace ? (
+                <p className="empty-text">Open a workspace to use source control.</p>
+              ) : (
                 <>
-                  <button
-                    type="button"
-                    className="tree-context-item"
-                    role="menuitem"
-                    onClick={() =>
-                      runTreeContextAction(() =>
-                        promptCreateNode("file", treeContextMenu.path, treeContextMenu.kind),
-                      )}
-                  >
-                    <FilePlus2 size={14} />
-                    <span>新建文件</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="tree-context-item"
-                    role="menuitem"
-                    onClick={() =>
-                      runTreeContextAction(() =>
-                        promptCreateNode("directory", treeContextMenu.path, treeContextMenu.kind),
-                      )}
-                  >
-                    <FolderPlus size={14} />
-                    <span>新建文件夹</span>
-                  </button>
-                  {!contextMenuOnRoot ? <div className="tree-context-separator" /> : null}
+                  <div className="scm-toolbar">
+                    <span className="scm-branch-label">
+                      {gitRepo?.isRepo ? (gitRepo.branch ?? "HEAD") : "No Git Repository"}
+                    </span>
+                    <button
+                      type="button"
+                      className="scm-button"
+                      disabled={isGitActionPending || isGitRefreshing}
+                      onClick={() => void refreshGitState()}
+                    >
+                      刷新
+                    </button>
+                  </div>
+
+                  {gitRepo?.isRepo ? (
+                    <>
+                      <div className="scm-sync-row">
+                        <span className="scm-sync-meta">
+                          ↑ {gitRepo.ahead} / ↓ {gitRepo.behind}
+                        </span>
+                        <div className="scm-sync-actions">
+                          <button
+                            type="button"
+                            className="scm-button"
+                            disabled={isGitActionPending || isGitRefreshing}
+                            onClick={() => void handleGitPullAction()}
+                          >
+                            Pull
+                          </button>
+                          <button
+                            type="button"
+                            className="scm-button"
+                            disabled={isGitActionPending || isGitRefreshing}
+                            onClick={() => void handleGitPushAction()}
+                          >
+                            Push
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="scm-branch-row">
+                        <select
+                          className="scm-branch-select"
+                          value={gitBranchState.currentBranch ?? ""}
+                          disabled={
+                            isGitActionPending
+                            || isGitRefreshing
+                            || gitBranchState.branches.length === 0
+                          }
+                          onChange={(event) => void handleGitCheckoutBranch(event.target.value)}
+                        >
+                          {gitBranchState.currentBranch ? null : (
+                            <option value="" disabled>
+                              Select branch
+                            </option>
+                          )}
+                          {gitBranchState.branches.map((branch) => (
+                            <option
+                              key={`${branch.isRemote ? "remote" : "local"}:${branch.name}`}
+                              value={branch.name}
+                            >
+                              {branch.isRemote ? `remote/${branch.name}` : branch.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="scm-commit">
+                        <textarea
+                          className="scm-commit-input"
+                          value={gitCommitMessage}
+                          placeholder="Commit message"
+                          disabled={isGitActionPending || isGitRefreshing}
+                          onChange={(event) => setGitCommitMessage(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="scm-button scm-button-primary"
+                          disabled={!gitCommitMessage.trim() || isGitActionPending || isGitRefreshing}
+                          onClick={() => void handleGitCommitSubmit()}
+                        >
+                          Commit
+                        </button>
+                      </div>
+
+                      <div className="scm-section">
+                        <div className="scm-section-head">
+                          <span>Staged ({gitStagedChanges.length})</span>
+                          <button
+                            type="button"
+                            className="scm-button"
+                            disabled={gitStagedChanges.length === 0 || isGitActionPending || isGitRefreshing}
+                            onClick={() => void unstageGitPaths(gitStagedChanges.map((change) => change.path))}
+                          >
+                            Unstage All
+                          </button>
+                        </div>
+                        {gitStagedChanges.length > 0 ? (
+                          <div className="scm-change-list">
+                            {gitStagedChanges.map((change) => {
+                              const selected = Boolean(
+                                gitSelectedDiffPath
+                                  && isSamePath(gitSelectedDiffPath, change.path)
+                                  && gitSelectedDiffStaged,
+                              );
+                              return (
+                                <div
+                                  key={`staged:${change.path}:${change.statusCode}`}
+                                  className={`scm-change-item ${selected ? "selected" : ""}`}
+                                >
+                                  <button
+                                    type="button"
+                                    className="scm-change-main"
+                                    title={change.path}
+                                    onClick={() => void loadGitDiffPreview(change.path, true)}
+                                  >
+                                    <span className="scm-change-code">{labelForGitChange(change)}</span>
+                                    <span className="scm-change-name">
+                                      {relativePathWithinWorkspace(change.path, workspace.rootPath)}
+                                    </span>
+                                  </button>
+                                  <div className="scm-change-actions">
+                                    <button
+                                      type="button"
+                                      className="scm-button"
+                                      disabled={isGitActionPending || isGitRefreshing}
+                                      onClick={() => void unstageGitPaths([change.path])}
+                                    >
+                                      Unstage
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="empty-text">No staged changes.</p>
+                        )}
+                      </div>
+
+                      <div className="scm-section">
+                        <div className="scm-section-head">
+                          <span>Changes ({gitUnstagedChanges.length})</span>
+                          <button
+                            type="button"
+                            className="scm-button"
+                            disabled={gitUnstagedChanges.length === 0 || isGitActionPending || isGitRefreshing}
+                            onClick={() => void stageGitPaths(gitUnstagedChanges.map((change) => change.path))}
+                          >
+                            Stage All
+                          </button>
+                        </div>
+                        {gitUnstagedChanges.length > 0 ? (
+                          <div className="scm-change-list">
+                            {gitUnstagedChanges.map((change) => {
+                              const selected = Boolean(
+                                gitSelectedDiffPath
+                                  && isSamePath(gitSelectedDiffPath, change.path)
+                                  && !gitSelectedDiffStaged,
+                              );
+                              return (
+                                <div
+                                  key={`changes:${change.path}:${change.statusCode}`}
+                                  className={`scm-change-item ${selected ? "selected" : ""}`}
+                                >
+                                  <button
+                                    type="button"
+                                    className="scm-change-main"
+                                    title={change.path}
+                                    onClick={() => void loadGitDiffPreview(change.path, false)}
+                                  >
+                                    <span className="scm-change-code">{labelForGitChange(change)}</span>
+                                    <span className="scm-change-name">
+                                      {relativePathWithinWorkspace(change.path, workspace.rootPath)}
+                                    </span>
+                                  </button>
+                                  <div className="scm-change-actions">
+                                    <button
+                                      type="button"
+                                      className="scm-button"
+                                      disabled={isGitActionPending || isGitRefreshing}
+                                      onClick={() => void stageGitPaths([change.path])}
+                                    >
+                                      Stage
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="scm-button danger"
+                                      disabled={isGitActionPending || isGitRefreshing}
+                                      onClick={() => void discardGitPaths([change.path])}
+                                    >
+                                      Discard
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="empty-text">No unstaged changes.</p>
+                        )}
+                      </div>
+
+                      <div className="scm-section">
+                        <div className="scm-section-head">
+                          <span>Untracked ({gitUntrackedChanges.length})</span>
+                        </div>
+                        {gitUntrackedChanges.length > 0 ? (
+                          <div className="scm-change-list">
+                            {gitUntrackedChanges.map((change) => (
+                              <div
+                                key={`untracked:${change.path}:${change.statusCode}`}
+                                className="scm-change-item"
+                              >
+                                <button
+                                  type="button"
+                                  className="scm-change-main"
+                                  title={change.path}
+                                  onClick={() => void loadGitDiffPreview(change.path, false)}
+                                >
+                                  <span className="scm-change-code">{labelForGitChange(change)}</span>
+                                  <span className="scm-change-name">
+                                    {relativePathWithinWorkspace(change.path, workspace.rootPath)}
+                                  </span>
+                                </button>
+                                <div className="scm-change-actions">
+                                  <button
+                                    type="button"
+                                    className="scm-button"
+                                    disabled={isGitActionPending || isGitRefreshing}
+                                    onClick={() => void stageGitPaths([change.path])}
+                                  >
+                                    Stage
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="scm-button danger"
+                                    disabled={isGitActionPending || isGitRefreshing}
+                                    onClick={() => void discardGitPaths([change.path])}
+                                  >
+                                    Discard
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="empty-text">No untracked files.</p>
+                        )}
+                      </div>
+
+                      <div className="scm-diff-panel">
+                        <div className="scm-section-head">
+                          <span>Diff Preview</span>
+                          {gitSelectedDiffPath ? (
+                            <button
+                              type="button"
+                              className="scm-button"
+                              disabled={isGitActionPending || isGitRefreshing}
+                              onClick={() => void openFile(gitSelectedDiffPath)}
+                            >
+                              Open File
+                            </button>
+                          ) : null}
+                        </div>
+                        {gitSelectedDiffPath ? (
+                          <>
+                            <p className="scm-diff-path">
+                              {relativePathWithinWorkspace(gitSelectedDiffPath, workspace.rootPath)}
+                              {gitSelectedDiffStaged ? " (staged)" : " (working tree)"}
+                            </p>
+                            <pre className="scm-diff-content">
+                              {gitDiffText || "No diff content for this file."}
+                            </pre>
+                          </>
+                        ) : (
+                          <p className="empty-text">Select a change to preview its diff.</p>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="empty-text">Current workspace is not a Git repository.</p>
+                  )}
                 </>
-              ) : null}
-
-              {!contextMenuOnRoot ? (
-                <button
-                  type="button"
-                  className="tree-context-item"
-                  role="menuitem"
-                  onClick={() =>
-                    runTreeContextAction(() => handleRenameTreePath(treeContextMenu.path, treeContextMenu.kind))}
-                >
-                  <Pencil size={14} />
-                  <span>重命名</span>
-                </button>
-              ) : null}
-
-              {!contextMenuOnRoot ? (
-                <button
-                  type="button"
-                  className="tree-context-item danger"
-                  role="menuitem"
-                  onClick={() =>
-                    runTreeContextAction(() => handleDeleteTreePath(treeContextMenu.path, treeContextMenu.kind))}
-                >
-                  <Trash2 size={14} />
-                  <span>删除</span>
-                </button>
-              ) : null}
+              )}
             </div>
-          ) : null}
+          )}
         </aside>
 
         <div
