@@ -8,7 +8,7 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 
 **Tech Stack**: Tauri 2, React 19.1.0, Monaco Editor, xterm.js, portable-pty 0.9
 
-**Current Status**: Foundation phase (M0) - building workbench layout, editor engine, and backend file commands.
+**Current Status**: Foundation phase (M0) - workbench layout, editor engine, backend file commands, and UI/UX features (drag-and-drop file tree, context menus, custom window frame).
 
 ## Development Commands
 
@@ -35,6 +35,7 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 ### Platform-Specific
 - Desktop: Works on Windows, macOS, Linux
 - Android: `pnpm tauri android init` then `pnpm tauri android dev`
+- **Primary Development Platform**: Windows 11 IoT Enterprise LTSC 2024
 
 ## Architecture
 
@@ -48,6 +49,9 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 - `src/utils.ts` - Helper functions (language detection, path handling, arg parsing)
 - `src/hints.ts` - Keyword-based code suggestion system (defined but not yet integrated in UI)
 
+**Feature Modules** (`src/features/`):
+- `src/features/explorer/useTreeDragDrop.ts` - File tree drag-and-drop hook with pointer event handling, drop validation, and click suppression
+
 **UI Dependencies**:
 - `@monaco-editor/react` - Monaco Editor React wrapper
 - `@xterm/xterm` + `@xterm/addon-fit` - Terminal emulation with auto-sizing
@@ -57,6 +61,8 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 - Custom window frame (`decorations: false` in tauri.conf.json)
 - Custom title bar with drag region (`data-tauri-drag-region`)
 - Window controls (minimize, maximize/close) implemented manually
+- Window APIs from `@tauri-apps/api/window`: `getCurrentWindow()`
+- Window operations: minimize, maximize, unmaximize, close
 
 **State Management Pattern**:
 - Centralized in `App.tsx` using React hooks (useState, useEffect, useMemo)
@@ -78,6 +84,15 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 - Custom One Dark Pro theme defined in `handleEditorMount` (orange variant)
 - Handles keyboard shortcuts (Ctrl+S for save, Tab for hints, Escape to close hints)
 - Editor options: word wrap on, minimap disabled, 13px font, 2-space tabs
+- Font size adjustable via Ctrl+Scroll (persists to localStorage)
+- Theme token colors defined inline:
+  - Keywords: `#c678dd` (purple)
+  - Strings: `#98c379` (green)
+  - Functions: `#61afef` (blue)
+  - Variables: `#e5c07b` (yellow)
+  - Types: `#e5c07b` (yellow)
+  - Comments: `#5c6370` (gray)
+  - Numbers: `#d19a66` (orange)
 
 **Terminal Integration** (xterm.js + portable-pty):
 - Uses `@xterm/xterm` with `@xterm/addon-fit` for auto-sizing
@@ -154,6 +169,11 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 
 **Key UI Patterns**:
 - Lazy-loaded directory tree (fetches children on expand)
+- **File Tree Drag-and-Drop**: Uses `useTreeDragDrop` hook for file/directory moves:
+  - Pointer-based drag with threshold detection (prevents accidental drags)
+  - Real-time drop validation (same-path, target-inside-source checks)
+  - Visual feedback for valid/invalid drop targets
+  - Click suppression after drag to prevent unintended selections
 - Tab-based editing with dirty state tracking (`content !== savedContent`)
 - Terminal sessions using portable-pty for cross-platform PTY support
 - **Monaco Editor Theming**: Custom One Dark Pro theme defined in `handleEditorMount`:
@@ -178,6 +198,25 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 - Runtime replacement in `ai_run` Rust command
 - Built-in providers: `codex`, `claude`, `gemini` (configurable via `aiProviderSuggestions`)
 - Working directory defaults to workspace root, custom CWD validated against workspace boundary
+
+### File Tree Features
+
+**Drag-and-Drop**:
+- Full pointer-based drag-and-drop for files and directories
+- Visual feedback with drop target highlighting and invalid target indication
+- Validation rules:
+  - Cannot drag root workspace folder
+  - Cannot drop parent into its own child
+  - Cannot drop item onto itself or into same parent
+  - Target directory cannot already contain an item with the same name
+- Uses `data-tree-drop-path` attribute to identify drop targets
+- Grace period for valid targets during rapid mouse movement
+- Automatic click suppression after drag operations
+
+**Context Actions**:
+- Right-click context menu for file/directory operations
+- File operations: Create, Rename, Delete, Move
+- Directory operations: Create nested files/folders, Expand/Collapse
 
 ### Phase 1 Scope (from PROJECT_PLAN.md)
 
@@ -215,6 +254,7 @@ When contributing changes:
 5. **Error Messages**: All Rust errors return as `String`, displayed in status bar
 6. **Ignored Directories**: `node_modules`, `dist`, `target` are automatically excluded from file tree and search
 7. **⚠️ Security Policy**: CSP is currently set to `null` in `tauri.conf.json` - **MUST be configured before production builds** to prevent XSS attacks
+8. **Drag-and-Drop Safety**: File moves must validate target is not inside source, source is not workspace root, and target path doesn't exist
 
 ### Key Constants
 
@@ -226,6 +266,17 @@ When contributing changes:
 
 **Frontend (`src/App.tsx`)**:
 - `WORKSPACE_STORAGE_KEY = "vexc.workspacePath"` - localStorage key for workspace persistence
+- `FONT_SIZE_STORAGE_KEY = "vexc.fontSize"` - localStorage key for editor font size
+- `DEFAULT_FONT_SIZE = 13` - Default editor font size in pixels
+- `MIN_FONT_SIZE = 10` - Minimum editor font size
+- `MAX_FONT_SIZE = 24` - Maximum editor font size
+- `CODE_FONT_FAMILY = '"JetBrains Mono", "Cascadia Code", Consolas, monospace'`
+- `CODE_FONT_SIZE = 13`
+- `CODE_LINE_HEIGHT = 18`
+
+**Drag-and-Drop (`src/features/explorer/useTreeDragDrop.ts`)**:
+- `CLICK_SUPPRESSION_TIMEOUT_MS = 0` - Click suppression delay after drag
+- `DROP_TARGET_GRACE_MS = 80` - Grace period for valid drop targets during rapid movement
 
 ### Development Workflow
 
@@ -244,6 +295,21 @@ When contributing changes:
 5. **Frontend API**: Add wrapper function in `src/api.ts` using `invoke<T>("command_name", { args })`
 6. **Types**: Add TypeScript types to `src/types.ts` matching Rust structs
 7. **Serialization**: Use `#[serde(rename_all = "camelCase")]` on Rust structs for TypeScript compatibility
+
+### Styling and Theme System
+
+**CSS Variables** (`src/App.css:root`):
+- All theme colors defined as CSS custom properties
+- Core palette: `--bg-canvas-top`, `--surface-0/1/2`, `--accent`, `--text`
+- Interactive states: `--interactive-hover`, `--interactive-active`
+- Use `var(--variable-name)` in component styles
+- Consistent semantic color naming across the codebase
+
+**Icon System**:
+- Uses `lucide-react` for consistent iconography
+- File type icons mapped from `FileKind` enum
+- Semantic icon categories: code, data, doc, media, archive, script, secure
+- Import patterns: `import { IconName } from "lucide-react"`
 
 ### Debugging Tips
 
@@ -282,6 +348,10 @@ When contributing changes:
 - `PascalCase` for React components
 - `camelCase` for variables, functions, and hooks
 - Tauri commands should be explicit and small
+- **Drag-and-Drop**: Use pointer events (not drag events) for custom DnD:
+  - `pointerdown` to start tracking, `pointermove` for drag, `pointerup` for drop
+  - Implement drag threshold to distinguish click vs drag
+  - Suppress click events after successful drag operations
 
 **Backend (Rust)**:
 - 4-space indentation (rustfmt default)
@@ -332,6 +402,14 @@ Use Conventional Commit format:
 - `fileNameFromPath(path)` → Extract filename from full path
 - `splitArgs(input)` → Parse shell-like argument string (handles quotes)
 
+**Frontend - `src/features/explorer/useTreeDragDrop.ts`**:
+- `useTreeDragDrop(options)` → File tree drag-and-drop hook
+  - `dragThresholdPx`: Minimum drag distance before drag starts
+  - `isSamePath(left, right)`: Path equality check (respect OS case sensitivity)
+  - `validateDrop(source, targetDirectoryPath)`: Drop validation logic
+  - `onDrop(source, targetDirectoryPath)`: Drop action handler
+  - Returns: `{ dndState, consumeClickSuppression, clearTreeDragDropState, handleTreePointerDown }`
+
 **Backend - Security Helpers**:
 - `ensure_inside_workspace(candidate, workspace_root)` → Path boundary validation
 - `is_probably_binary(bytes)` → Detect binary files via null bytes (first 1KB scanned)
@@ -348,9 +426,34 @@ Current phase aims to complete M0 (Foundation):
 - Backend file commands ✅
 - Terminal session management ✅
 - AI CLI integration ✅
+- File tree drag-and-drop ✅
+- Context menu system ✅
+- Custom window frame ✅
 
 Next: M1 (Core Editing) - Enhance file operations, dirty state handling, workspace search.
 
+## Code Organization Patterns
+
+### Feature-Based Structure
+New features should be organized under `src/features/<feature-name>/`:
+- Custom hooks for complex logic (e.g., `useTreeDragDrop.ts`)
+- Feature-specific types and utilities
+- This keeps the main `App.tsx` focused on composition
+
+### State Management Refs Pattern
+When adding new state that needs to be accessed in async callbacks:
+1. Create state: `const [items, setItems] = useState<T[]>([])`
+2. Create matching ref: `const itemsRef = useRef<T[]>([])`
+3. Sync with useEffect: `useEffect(() => { itemsRef.current = items }, [items])`
+4. Use ref in async callbacks to avoid stale closures
+
+### Adding Drag-and-Drop to New Components
+For new draggable components, follow the `useTreeDragDrop` pattern:
+1. Add `data-tree-drop-path={path}` attribute to drop target elements
+2. Implement `isSamePath` for proper path comparison (OS-aware)
+3. Implement `validateDrop` with specific business rules
+4. Handle drop rejection UI feedback via `onDropRejected`
+
 ---
 
-**Last Updated**: 2026-02-15
+**Last Updated**: 2026-02-19

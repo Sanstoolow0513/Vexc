@@ -846,7 +846,9 @@ function App() {
 
   const [tabs, setTabs] = useState<EditorTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const activeTabIdRef = useRef<string | null>(null);
   const tabsRef = useRef<EditorTab[]>([]);
+  const saveInFlightByTabRef = useRef<Record<string, Promise<void>>>({});
   const openFileRequestsRef = useRef<Record<string, Promise<string | null>>>({});
 
   const [terminals, setTerminals] = useState<TerminalSession[]>([]);
@@ -913,6 +915,10 @@ function App() {
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
 
   useEffect(() => {
     terminalsRef.current = terminals;
@@ -2057,33 +2063,48 @@ function App() {
   }
 
   async function saveTab(tabId?: string): Promise<void> {
-    const targetId = tabId ?? activeTabId;
+    const targetId = tabId ?? activeTabIdRef.current;
     if (!targetId) {
       setStatusMessage("No active file to save.");
       return;
     }
 
-    const tab = tabsRef.current.find((item) => item.id === targetId);
-    if (!tab) {
-      setStatusMessage("Tab not found.");
+    const existingSave = saveInFlightByTabRef.current[targetId];
+    if (existingSave) {
+      await existingSave;
       return;
     }
 
+    const request = (async (): Promise<void> => {
+      const tab = tabsRef.current.find((item) => item.id === targetId);
+      if (!tab) {
+        setStatusMessage("Tab not found.");
+        return;
+      }
+
+      try {
+        await writeFile(tab.path, tab.content);
+        setTabs((previous) =>
+          previous.map((item) =>
+            item.id === targetId
+              ? {
+                  ...item,
+                  savedContent: item.content,
+                }
+              : item,
+          ),
+        );
+        setStatusMessage(`Saved ${tab.title}`);
+      } catch (error) {
+        setStatusMessage(`Save failed: ${String(error)}`);
+      }
+    })();
+
+    saveInFlightByTabRef.current[targetId] = request;
     try {
-      await writeFile(tab.path, tab.content);
-      setTabs((previous) =>
-        previous.map((item) =>
-          item.id === targetId
-            ? {
-                ...item,
-                savedContent: item.content,
-              }
-            : item,
-        ),
-      );
-      setStatusMessage(`Saved ${tab.title}`);
-    } catch (error) {
-      setStatusMessage(`Save failed: ${String(error)}`);
+      await request;
+    } finally {
+      delete saveInFlightByTabRef.current[targetId];
     }
   }
 
@@ -2209,21 +2230,6 @@ function App() {
     } catch (error) {
       setStatusMessage(`Failed to close terminal: ${String(error)}`);
     }
-  }
-
-  async function focusOrCreateTerminalTab(): Promise<void> {
-    const existingSessions = terminalsRef.current;
-    if (existingSessions.length === 0) {
-      await createTerminalSession();
-      return;
-    }
-
-    const targetSessionId =
-      activeTerminalIdRef.current && existingSessions.some((session) => session.id === activeTerminalIdRef.current)
-        ? activeTerminalIdRef.current
-        : existingSessions[0].id;
-
-    await selectTerminal(targetSessionId);
   }
 
   function queueTerminalInput(data: string): void {
@@ -2634,49 +2640,6 @@ function App() {
   }, [appWindow]);
 
   useEffect(() => {
-    const handler = (event: globalThis.KeyboardEvent) => {
-      const terminalHasFocus = Boolean(
-        terminalHostRef.current && document.activeElement && terminalHostRef.current.contains(document.activeElement),
-      );
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-        if (!isFileTabActive) {
-          return;
-        }
-
-        event.preventDefault();
-        void saveTab();
-        return;
-      }
-
-      if ((event.ctrlKey || event.metaKey) && event.key === "`") {
-        event.preventDefault();
-        void focusOrCreateTerminalTab();
-        return;
-      }
-
-      if (terminalHasFocus && (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v") {
-        event.preventDefault();
-        void navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text) {
-              queueTerminalInput(text);
-            }
-          })
-          .catch((error) => {
-            setStatusMessage(`Paste failed: ${String(error)}`);
-          });
-      }
-    };
-
-    window.addEventListener("keydown", handler);
-    return () => {
-      window.removeEventListener("keydown", handler);
-    };
-  }, [isFileTabActive]);
-
-  useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (!hasDirtyTabs) {
         return;
@@ -2825,19 +2788,6 @@ function App() {
                     <span className="menu-item-label">保存</span>
                   </span>
                   <span className="menu-item-hint">Ctrl+S</span>
-                </button>
-                <div className="menu-divider" />
-                <button
-                  type="button"
-                  className="menu-item"
-                  role="menuitem"
-                  onClick={() => runHeaderMenuAction(createTerminalSession)}
-                >
-                  <span className="menu-item-main">
-                    <span className="menu-item-indicator" aria-hidden="true" />
-                    <span className="menu-item-label">新建终端</span>
-                  </span>
-                  <span className="menu-item-hint">Ctrl+`</span>
                 </button>
               </div>
             ) : null}
