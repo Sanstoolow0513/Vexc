@@ -6,6 +6,7 @@ import type {
   AiRunResult,
   FileContent,
   FileNode,
+  LspSessionInfo,
   PathResult,
   SaveResult,
   SearchHit,
@@ -105,6 +106,22 @@ export async function terminalClear(sessionId: string): Promise<TerminalSessionS
 
 export async function terminalClose(sessionId: string): Promise<Ack> {
   return invoke<Ack>("terminal_close", { sessionId });
+}
+
+export async function lspStart(
+  server: string,
+  args: string[],
+  rootPath: string,
+): Promise<LspSessionInfo> {
+  return invoke<LspSessionInfo>("lsp_start", { server, args, rootPath });
+}
+
+export async function lspSend(sessionId: string, payload: string): Promise<Ack> {
+  return invoke<Ack>("lsp_send", { sessionId, payload });
+}
+
+export async function lspStop(sessionId: string): Promise<Ack> {
+  return invoke<Ack>("lsp_stop", { sessionId });
 }
 
 export async function aiProviderSuggestions(): Promise<AiProviderSuggestion[]> {

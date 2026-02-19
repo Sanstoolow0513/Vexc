@@ -1,4 +1,13 @@
 export type FileKind = "file" | "directory";
+export type LanguageId =
+  | "plaintext"
+  | "typescript"
+  | "javascript"
+  | "json"
+  | "css"
+  | "html"
+  | "markdown"
+  | "rust";
 
 export interface WorkspaceInfo {
   rootPath: string;
@@ -103,7 +112,7 @@ export interface EditorTab {
   title: string;
   content: string;
   savedContent: string;
-  language: string;
+  language: LanguageId;
 }
 
 export interface HintSuggestion {
@@ -111,4 +120,56 @@ export interface HintSuggestion {
   title: string;
   message: string;
   insertText: string;
+}
+
+export type DiagnosticSeverity = "error" | "warning" | "info" | "hint";
+
+export interface EditorDiagnostic {
+  id: string;
+  path: string;
+  line: number;
+  column: number;
+  severity: DiagnosticSeverity;
+  source: string;
+  message: string;
+  code?: string | null;
+}
+
+export type OutputChannel = "system" | "lsp" | "terminal" | "workspace";
+export type OutputLevel = "error" | "warning" | "info" | "debug";
+export type SignalsPanelTab = "problems" | "output";
+
+export interface OutputEntry {
+  id: string;
+  channel: OutputChannel;
+  level: OutputLevel;
+  message: string;
+  timestamp: number;
+  path?: string;
+  line?: number;
+  column?: number;
+  dedupeKey?: string;
+  count: number;
+}
+
+export interface EditorSignalState {
+  unread: number;
+  hasError: boolean;
+  hasWarning: boolean;
+  panelOpen: boolean;
+  activeTab: SignalsPanelTab;
+}
+
+export interface LspSessionInfo {
+  id: string;
+  server: string;
+  rootPath: string;
+  status: string;
+}
+
+export interface LspMessageEvent {
+  sessionId: string;
+  channel: "stdout" | "stderr" | "system";
+  payload: string;
+  isError: boolean;
 }

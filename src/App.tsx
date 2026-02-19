@@ -69,10 +69,14 @@ import {
   writeFile,
 } from "./api";
 import type {
+  EditorDiagnostic,
   EditorTab,
+  LspMessageEvent,
   FileKind,
   FileNode,
   MovePathErrorCode,
+  OutputLevel,
+  SignalsPanelTab,
   TerminalOutputEvent,
   TerminalSession,
   TerminalSessionSnapshot,
@@ -84,6 +88,19 @@ import {
   type TreeDropRejectionReason,
   useTreeDragDrop,
 } from "./features/explorer/useTreeDragDrop";
+import { HeaderSignals } from "./components/HeaderSignals";
+import { SignalsPanel } from "./components/SignalsPanel";
+import { createRustLspClient } from "./editor/lsp/rustLspClient";
+import { MONACO_THEME_NAME, mountMonacoEditor } from "./editor/monacoSetup";
+import {
+  appendOutputEntry,
+  buildSignalState,
+  clearOutputEntries,
+  createInitialOutputStoreState,
+  inferOutputLevelFromMessage,
+  setOutputPanelOpen,
+  setOutputPanelTab,
+} from "./editor/outputStore";
 import { detectLanguage, fileNameFromPath } from "./utils";
 import "./App.css";
 
@@ -113,29 +130,6 @@ function clampTerminalBuffer(value: string): string {
   }
   return value.slice(value.length - MAX_TERMINAL_BUFFER_CHARS);
 }
-
-// 默认暗色主题
-const DEFAULT_MONACO_THEME: MonacoEditor.IStandaloneThemeData = {
-  base: "vs-dark",
-  inherit: true,
-  rules: [
-    { token: "keyword", foreground: "c678dd" },
-    { token: "variable", foreground: "e06c75" },
-    { token: "string", foreground: "98c379" },
-    { token: "function", foreground: "61afef" },
-    { token: "number", foreground: "d19a66" },
-    { token: "comment", foreground: "5c6370", fontStyle: "italic" },
-    { token: "type", foreground: "e5c07b" },
-  ],
-  colors: {
-    "editor.background": "#0a0c10",
-    "editor.foreground": "#abb2bf",
-    "editorCursor.foreground": "#d19a66",
-    "editor.lineHighlightBackground": "#13161c",
-    "editor.selectionBackground": "#2c313a",
-    "editor.inactiveSelectionBackground": "#1c1f26",
-  },
-};
 
 const DEFAULT_TERMINAL_THEME: ITheme = {
   background: "#000000",
@@ -369,6 +363,35 @@ function toDropValidationResult(reason: TreeDropRejectionReason | null): DropVal
   }
 
   return { ok: false, reason };
+}
+
+const DIAGNOSTIC_SEVERITY_ORDER: Record<EditorDiagnostic["severity"], number> = {
+  error: 0,
+  warning: 1,
+  info: 2,
+  hint: 3,
+};
+
+const OUTPUT_LEVEL_ORDER: Record<OutputLevel, number> = {
+  error: 0,
+  warning: 1,
+  info: 2,
+  debug: 3,
+};
+
+function markerSeverityToDiagnosticSeverity(severity: number): EditorDiagnostic["severity"] {
+  switch (severity) {
+    case 8:
+      return "error";
+    case 4:
+      return "warning";
+    case 2:
+      return "info";
+    case 1:
+      return "hint";
+    default:
+      return "warning";
+  }
 }
 
 type TreeIconTone =
@@ -866,7 +889,11 @@ function App() {
 
   const [pendingPosition, setPendingPosition] = useState<PendingPosition | null>(null);
   const [editorReadySeq, setEditorReadySeq] = useState(0);
-  const [, setStatusMessage] = useState("Ready");
+  const [statusMessage, setStatusMessageState] = useState("Ready");
+  const [outputState, setOutputState] = useState(() => createInitialOutputStoreState());
+  const [outputLevelFilter, setOutputLevelFilter] = useState<OutputLevel | "all">("all");
+  const [monacoDiagnosticsByPath, setMonacoDiagnosticsByPath] = useState<Record<string, EditorDiagnostic[]>>({});
+  const [lspDiagnosticsByPath, setLspDiagnosticsByPath] = useState<Record<string, EditorDiagnostic[]>>({});
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [isExplorerVisible, setIsExplorerVisible] = useState(true);
   const [explorerWidth, setExplorerWidth] = useState(EXPLORER_DEFAULT_WIDTH);
@@ -884,7 +911,6 @@ function App() {
 
   const monacoEditorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const monacoApiRef = useRef<typeof import("monaco-editor") | null>(null);
-  const monacoThemesRegisteredRef = useRef(false);
   const terminalRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
@@ -892,9 +918,13 @@ function App() {
   const treeContextMenuRef = useRef<HTMLDivElement | null>(null);
   const treeInlineInputRef = useRef<HTMLInputElement | null>(null);
   const workbenchGridRef = useRef<HTMLDivElement | null>(null);
+  const signalsPanelRef = useRef<HTMLElement | null>(null);
   const explorerResizePointerIdRef = useRef<number | null>(null);
   const explorerLastVisibleWidthRef = useRef(EXPLORER_DEFAULT_WIDTH);
   const treeInlineEditIdRef = useRef(0);
+  const rustLspVersionByPathRef = useRef<Record<string, number>>({});
+  const rustLspLastPathRef = useRef<string | null>(null);
+  const rustLspClientRef = useRef<ReturnType<typeof createRustLspClient> | null>(null);
 
   const {
     dndState: treeDnDState,
@@ -911,6 +941,111 @@ function App() {
       closeTreeContextMenu();
     },
   });
+
+  const activeTab = useMemo(
+    () => tabs.find((tab) => tab.id === activeTabId) ?? null,
+    [tabs, activeTabId],
+  );
+  const isFileTabActive = activeWorkbenchTabKind === "file";
+  const activeFileTab = isFileTabActive ? activeTab : null;
+  const hasDirtyTabs = useMemo(
+    () => tabs.some((tab) => tab.content !== tab.savedContent),
+    [tabs],
+  );
+
+  const appendOutput = useCallback((
+    message: string,
+    level: OutputLevel,
+    channel: "system" | "lsp" | "terminal" | "workspace",
+    options?: {
+      dedupeKey?: string;
+      path?: string;
+      line?: number;
+      column?: number;
+    },
+  ) => {
+    setOutputState((previous) =>
+      appendOutputEntry(previous, {
+        channel,
+        level,
+        message,
+        dedupeKey: options?.dedupeKey,
+        path: options?.path,
+        line: options?.line,
+        column: options?.column,
+      }),
+    );
+  }, []);
+
+  const setStatusMessage = useCallback((
+    message: string,
+    level?: OutputLevel,
+    channel: "system" | "lsp" | "terminal" | "workspace" = "system",
+  ) => {
+    setStatusMessageState(message);
+    appendOutput(message, level ?? inferOutputLevelFromMessage(message), channel, {
+      dedupeKey: `${channel}:${message}`,
+    });
+  }, [appendOutput]);
+
+  const syncActiveMonacoDiagnostics = useCallback(() => {
+    const monacoApi = monacoApiRef.current;
+    const editor = monacoEditorRef.current;
+    const model = editor?.getModel();
+    if (!monacoApi || !editor || !model || !activeTab) {
+      return;
+    }
+
+    const markers = monacoApi.editor.getModelMarkers({ resource: model.uri });
+    const mapped: EditorDiagnostic[] = markers
+      .filter((marker) => marker.owner !== "vexc-rust-lsp")
+      .map((marker, index) => ({
+        id: `marker:${activeTab.path}:${marker.startLineNumber}:${marker.startColumn}:${index}`,
+        path: activeTab.path,
+        line: marker.startLineNumber,
+        column: marker.startColumn,
+        severity: markerSeverityToDiagnosticSeverity(marker.severity),
+        source: marker.source ?? "monaco",
+        message: marker.message,
+        code: marker.code ? String(marker.code) : null,
+      }));
+
+    const key = normalizePathForComparison(activeTab.path);
+    setMonacoDiagnosticsByPath((previous) => ({
+      ...previous,
+      [key]: mapped,
+    }));
+  }, [activeTab]);
+
+  const applyRustLspMarkers = useCallback(() => {
+    const monacoApi = monacoApiRef.current;
+    const editor = monacoEditorRef.current;
+    const model = editor?.getModel();
+    if (!monacoApi || !editor || !model || !activeTab) {
+      return;
+    }
+
+    const diagnostics = lspDiagnosticsByPath[normalizePathForComparison(activeTab.path)] ?? [];
+    const markers = diagnostics.map((diagnostic) => ({
+      severity:
+        diagnostic.severity === "error"
+          ? monacoApi.MarkerSeverity.Error
+          : diagnostic.severity === "warning"
+            ? monacoApi.MarkerSeverity.Warning
+            : diagnostic.severity === "info"
+              ? monacoApi.MarkerSeverity.Info
+              : monacoApi.MarkerSeverity.Hint,
+      message: diagnostic.message,
+      source: diagnostic.source,
+      code: diagnostic.code ?? undefined,
+      startLineNumber: diagnostic.line,
+      startColumn: diagnostic.column,
+      endLineNumber: diagnostic.line,
+      endColumn: diagnostic.column + 1,
+    }));
+
+    monacoApi.editor.setModelMarkers(model, "vexc-rust-lsp", markers);
+  }, [activeTab, lspDiagnosticsByPath]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -1040,6 +1175,42 @@ function App() {
   }, [treeContextMenu]);
 
   useEffect(() => {
+    if (!outputState.panelOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (target instanceof Element && target.closest(".signals-trigger")) {
+        return;
+      }
+      if (signalsPanelRef.current?.contains(target)) {
+        return;
+      }
+      closeSignalsPanel();
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      closeSignalsPanel();
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeSignalsPanel, outputState.panelOpen]);
+
+  useEffect(() => {
     if (!treeInlineEdit) {
       return;
     }
@@ -1073,18 +1244,157 @@ function App() {
     };
   }, [isExplorerResizing]);
 
-  const activeTab = useMemo(
-    () => tabs.find((tab) => tab.id === activeTabId) ?? null,
-    [tabs, activeTabId],
+  const problems = useMemo(() => {
+    const all = [
+      ...Object.values(monacoDiagnosticsByPath).flat(),
+      ...Object.values(lspDiagnosticsByPath).flat(),
+    ];
+
+    all.sort((left, right) => {
+      const severityCompare = DIAGNOSTIC_SEVERITY_ORDER[left.severity] - DIAGNOSTIC_SEVERITY_ORDER[right.severity];
+      if (severityCompare !== 0) {
+        return severityCompare;
+      }
+      const pathCompare = left.path.localeCompare(right.path);
+      if (pathCompare !== 0) {
+        return pathCompare;
+      }
+      if (left.line !== right.line) {
+        return left.line - right.line;
+      }
+      return left.column - right.column;
+    });
+
+    return all;
+  }, [lspDiagnosticsByPath, monacoDiagnosticsByPath]);
+
+  const problemErrorCount = useMemo(
+    () => problems.filter((problem) => problem.severity === "error").length,
+    [problems],
+  );
+  const problemWarningCount = useMemo(
+    () => problems.filter((problem) => problem.severity === "warning").length,
+    [problems],
   );
 
-  const isFileTabActive = activeWorkbenchTabKind === "file";
-  const activeFileTab = isFileTabActive ? activeTab : null;
+  const visibleOutputEntries = useMemo(() => {
+    const entries = [...outputState.entries];
+    entries.sort((left, right) => {
+      if (left.timestamp !== right.timestamp) {
+        return right.timestamp - left.timestamp;
+      }
+      return OUTPUT_LEVEL_ORDER[left.level] - OUTPUT_LEVEL_ORDER[right.level];
+    });
+    if (outputLevelFilter === "all") {
+      return entries;
+    }
+    return entries.filter((entry) => entry.level === outputLevelFilter);
+  }, [outputLevelFilter, outputState.entries]);
 
-  const hasDirtyTabs = useMemo(
-    () => tabs.some((tab) => tab.content !== tab.savedContent),
-    [tabs],
+  const signalState = useMemo(
+    () => buildSignalState(outputState, problemErrorCount, problemWarningCount),
+    [outputState, problemErrorCount, problemWarningCount],
   );
+
+  useEffect(() => {
+    const client = createRustLspClient({
+      onDiagnostics: (path, diagnostics) => {
+        const key = normalizePathForComparison(path);
+        setLspDiagnosticsByPath((previous) => ({
+          ...previous,
+          [key]: diagnostics,
+        }));
+      },
+      onOutput: (entry) => {
+        appendOutput(entry.message, entry.level, entry.channel, {
+          dedupeKey: entry.dedupeKey,
+        });
+      },
+    });
+
+    rustLspClientRef.current = client;
+
+    return () => {
+      void client.stop();
+      rustLspClientRef.current = null;
+    };
+  }, [appendOutput]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    void listen<LspMessageEvent>("lsp://message", (event) => {
+      rustLspClientRef.current?.handleMessage(event.payload);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const client = rustLspClientRef.current;
+    if (!client) {
+      return;
+    }
+
+    if (!workspace || activeWorkbenchTabKind !== "file" || !activeTab || activeTab.language !== "rust") {
+      const previousPath = rustLspLastPathRef.current;
+      if (previousPath) {
+        void client.closeDocument(previousPath);
+        rustLspLastPathRef.current = null;
+      }
+      return;
+    }
+
+    const run = async () => {
+      const started = await client.ensureStarted(workspace.rootPath);
+      if (!started) {
+        return;
+      }
+
+      const previousPath = rustLspLastPathRef.current;
+      if (previousPath && !isSamePath(previousPath, activeTab.path)) {
+        await client.closeDocument(previousPath);
+      }
+
+      const key = normalizePathForComparison(activeTab.path);
+      const nextVersion = (rustLspVersionByPathRef.current[key] ?? 0) + 1;
+      rustLspVersionByPathRef.current[key] = nextVersion;
+
+      await client.syncDocument(activeTab.path, activeTab.content, nextVersion);
+      rustLspLastPathRef.current = activeTab.path;
+    };
+
+    void run();
+  }, [activeTab, activeWorkbenchTabKind, workspace]);
+
+  useEffect(() => {
+    const monacoApi = monacoApiRef.current;
+    const editor = monacoEditorRef.current;
+    const model = editor?.getModel();
+    if (!monacoApi || !editor || !model || !activeTab) {
+      return;
+    }
+
+    syncActiveMonacoDiagnostics();
+    applyRustLspMarkers();
+
+    const modelUri = model.uri.toString();
+    const disposable = monacoApi.editor.onDidChangeMarkers((resources) => {
+      if (resources.some((resource) => resource.toString() === modelUri)) {
+        syncActiveMonacoDiagnostics();
+      }
+    });
+
+    return () => {
+      disposable.dispose();
+    };
+  }, [activeTab, applyRustLspMarkers, editorReadySeq, syncActiveMonacoDiagnostics]);
 
   function tabIsDirty(tab: EditorTab): boolean {
     return tab.content !== tab.savedContent;
@@ -1111,6 +1421,35 @@ function App() {
 
   function adjustFontSize(delta: number): void {
     setFontSize((previous) => Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, previous + delta)));
+  }
+
+  function toggleSignalsPanel(): void {
+    setOutputState((previous) => {
+      const nextPanelOpen = !previous.panelOpen;
+      let next = setOutputPanelOpen(previous, nextPanelOpen);
+      if (nextPanelOpen && problems.length > 0) {
+        next = setOutputPanelTab(next, "problems");
+      }
+      return next;
+    });
+  }
+
+  function closeSignalsPanel(): void {
+    setOutputState((previous) => setOutputPanelOpen(previous, false));
+    monacoEditorRef.current?.focus();
+  }
+
+  function selectSignalsTab(tab: SignalsPanelTab): void {
+    setOutputState((previous) => setOutputPanelTab(previous, tab));
+  }
+
+  function clearSignalOutputs(): void {
+    setOutputState((previous) => clearOutputEntries(previous));
+  }
+
+  function jumpToProblem(problem: EditorDiagnostic): void {
+    closeSignalsPanel();
+    void openFile(problem.path, { line: problem.line, column: problem.column });
   }
 
   function stopExplorerResize(handle: HTMLDivElement | null): void {
@@ -1221,7 +1560,7 @@ function App() {
   async function loadDirectory(path: string): Promise<void> {
     setDirectoryLoading(path, true);
     try {
-      const nodes = await listDirectory(path, false);
+      const nodes = await listDirectory(path, true);
       setTreeByPath((previous) => ({
         ...previous,
         [path]: nodes,
@@ -1361,6 +1700,32 @@ function App() {
       nextRequests[replacePathPrefix(key, previousPath, nextPath)] = request;
     }
     openFileRequestsRef.current = nextRequests;
+
+    setMonacoDiagnosticsByPath((previous) => {
+      const next: Record<string, EditorDiagnostic[]> = {};
+      for (const [key, diagnostics] of Object.entries(previous)) {
+        const mappedKey = replacePathPrefix(key, previousPath, nextPath);
+        next[mappedKey] = diagnostics.map((diagnostic) =>
+          isSameOrDescendantPath(diagnostic.path, previousPath)
+            ? { ...diagnostic, path: replacePathPrefix(diagnostic.path, previousPath, nextPath) }
+            : diagnostic
+        );
+      }
+      return next;
+    });
+
+    setLspDiagnosticsByPath((previous) => {
+      const next: Record<string, EditorDiagnostic[]> = {};
+      for (const [key, diagnostics] of Object.entries(previous)) {
+        const mappedKey = replacePathPrefix(key, previousPath, nextPath);
+        next[mappedKey] = diagnostics.map((diagnostic) =>
+          isSameOrDescendantPath(diagnostic.path, previousPath)
+            ? { ...diagnostic, path: replacePathPrefix(diagnostic.path, previousPath, nextPath) }
+            : diagnostic
+        );
+      }
+      return next;
+    });
   }
 
   function removePathFromExplorerState(path: string): void {
@@ -1439,6 +1804,26 @@ function App() {
 
     const nextTabs = existingTabs.filter((tab) => !isSameOrDescendantPath(tab.path, path));
     setTabs(nextTabs);
+
+    setMonacoDiagnosticsByPath((previous) => {
+      const next: Record<string, EditorDiagnostic[]> = {};
+      for (const [key, diagnostics] of Object.entries(previous)) {
+        if (!isSameOrDescendantPath(key, path)) {
+          next[key] = diagnostics;
+        }
+      }
+      return next;
+    });
+
+    setLspDiagnosticsByPath((previous) => {
+      const next: Record<string, EditorDiagnostic[]> = {};
+      for (const [key, diagnostics] of Object.entries(previous)) {
+        if (!isSameOrDescendantPath(key, path)) {
+          next[key] = diagnostics;
+        }
+      }
+      return next;
+    });
 
     if (!activeTabId || !isSameOrDescendantPath(activeTabId, path)) {
       return;
@@ -1959,6 +2344,7 @@ function App() {
     }
 
     try {
+      await rustLspClientRef.current?.stop();
       const info = await setWorkspace(normalizedPath);
       setWorkspaceState(info);
       localStorage.setItem(WORKSPACE_STORAGE_KEY, info.rootPath);
@@ -1966,6 +2352,10 @@ function App() {
       setTabs([]);
       setActiveTabId(null);
       setActiveWorkbenchTabKind("file");
+      setMonacoDiagnosticsByPath({});
+      setLspDiagnosticsByPath({});
+      rustLspVersionByPathRef.current = {};
+      rustLspLastPathRef.current = null;
       openFileRequestsRef.current = {};
       setOpeningFilesByPath({});
 
@@ -1995,9 +2385,9 @@ function App() {
       redrawTerminal(null);
       await refreshTerminalSessions();
 
-      setStatusMessage(`Workspace ready: ${info.rootName}`);
+      setStatusMessage(`Workspace ready: ${info.rootName}`, "info", "workspace");
     } catch (error) {
-      setStatusMessage(`Failed to open workspace: ${String(error)}`);
+      setStatusMessage(`Failed to open workspace: ${String(error)}`, "error", "workspace");
     }
   }
 
@@ -2302,20 +2692,13 @@ function App() {
     monacoApiRef.current = monacoApi;
     setEditorReadySeq((value) => value + 1);
 
-    if (!monacoThemesRegisteredRef.current) {
-      monacoApi.editor.defineTheme("vexc-one-dark-pro-orange", DEFAULT_MONACO_THEME);
-      monacoThemesRegisteredRef.current = true;
-    }
-
     try {
-      monacoApi.editor.setTheme("vexc-one-dark-pro-orange");
+      mountMonacoEditor(editor, monacoApi, () => {
+        void saveTab();
+      });
     } catch (error) {
       setStatusMessage(`Failed to apply editor theme: ${String(error)}`);
     }
-
-    editor.addCommand(monacoApi.KeyMod.CtrlCmd | monacoApi.KeyCode.KeyS, () => {
-      void saveTab();
-    });
   }
 
   async function promptWorkspacePath(): Promise<void> {
@@ -2605,6 +2988,12 @@ function App() {
         return;
       }
 
+      if (payload.isError) {
+        appendOutput(payload.chunk.trim(), "warning", "terminal", {
+          dedupeKey: `terminal-error:${payload.sessionId}:${payload.chunk.slice(0, 120)}`,
+        });
+      }
+
       const pendingOutputBySession = terminalPendingOutputBySessionRef.current;
       const existingChunk = pendingOutputBySession[payload.sessionId] ?? "";
       pendingOutputBySession[payload.sessionId] = `${existingChunk}${payload.chunk}`;
@@ -2619,7 +3008,7 @@ function App() {
         unlisten();
       }
     };
-  }, []);
+  }, [appendOutput]);
 
   useEffect(() => {
     void restoreWorkspaceAndState();
@@ -2828,6 +3217,14 @@ function App() {
             >
               <FolderSearch size={14} aria-hidden="true" />
             </button>
+
+            <HeaderSignals
+              signal={signalState}
+              problemCount={problems.length}
+              errorCount={problemErrorCount}
+              warningCount={problemWarningCount}
+              onTogglePanel={toggleSignalsPanel}
+            />
           </div>
         </div>
 
@@ -3083,7 +3480,7 @@ function App() {
                   value={activeTab.content}
                   onMount={handleEditorMount}
                   onChange={(value) => updateActiveTabContent(value ?? "")}
-                  theme="vexc-one-dark-pro-orange"
+                  theme={MONACO_THEME_NAME}
                   className="editor-monaco"
                   height="100%"
                   options={{
@@ -3114,6 +3511,22 @@ function App() {
           </section>
         </section>
       </div>
+
+      <section ref={signalsPanelRef} className="signals-panel-anchor">
+        <SignalsPanel
+          open={outputState.panelOpen}
+          activeTab={outputState.activeTab}
+          statusMessage={statusMessage}
+          problems={problems}
+          outputEntries={visibleOutputEntries}
+          outputLevelFilter={outputLevelFilter}
+          onClose={closeSignalsPanel}
+          onTabChange={selectSignalsTab}
+          onOutputLevelFilterChange={setOutputLevelFilter}
+          onSelectProblem={jumpToProblem}
+          onClearOutput={clearSignalOutputs}
+        />
+      </section>
 
     </div>
   );
