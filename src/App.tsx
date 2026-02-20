@@ -82,6 +82,7 @@ import {
 import type {
   EditorDiagnostic,
   EditorTab,
+  FeedbackLevel,
   LspMessageEvent,
   FileKind,
   FileNode,
@@ -91,7 +92,10 @@ import type {
   GitRepoStatus,
   MovePathErrorCode,
   OutputLevel,
+  StatusBarFileInfo,
+  StatusBarTerminalInfo,
   SignalsPanelTab,
+  ToastNotification,
   TerminalOutputEvent,
   TerminalSession,
   TerminalSessionSnapshot,
@@ -104,7 +108,9 @@ import {
   useTreeDragDrop,
 } from "./features/explorer/useTreeDragDrop";
 import { HeaderSignals } from "./components/HeaderSignals";
+import { StatusBar } from "./components/StatusBar";
 import { SignalsPanel } from "./components/SignalsPanel";
+import { ToastViewport } from "./components/ToastViewport";
 import { createRustLspClient } from "./editor/lsp/rustLspClient";
 import { MONACO_THEME_NAME, mountMonacoEditor } from "./editor/monacoSetup";
 import {
@@ -138,6 +144,15 @@ const EXPLORER_MIN_WIDTH = 180;
 const EXPLORER_RESIZER_WIDTH = 6;
 const EXPLORER_MAIN_PANEL_MIN_WIDTH = 260;
 const TREE_POINTER_DRAG_THRESHOLD_PX = 6;
+const MAX_VISIBLE_TOASTS = 4;
+const DEFAULT_TOAST_DURATION_MS = 3400;
+
+const TOAST_DURATION_MS_BY_LEVEL: Record<FeedbackLevel, number> = {
+  success: 2800,
+  info: DEFAULT_TOAST_DURATION_MS,
+  warning: 4500,
+  error: 6000,
+};
 
 function clampTerminalBuffer(value: string): string {
   if (value.length <= MAX_TERMINAL_BUFFER_CHARS) {
@@ -443,6 +458,38 @@ function markerSeverityToDiagnosticSeverity(severity: number): EditorDiagnostic[
     default:
       return "warning";
   }
+}
+
+const SUCCESS_STATUS_PATTERNS: RegExp[] = [
+  /\b(saved?|opened?|created?|renamed?|deleted?|moved?|staged|unstaged|committed?|checked out|completed|ready|applied)\b/i,
+  /成功|完成|已(创建|打开|保存|重命名|删除|移动)/,
+];
+
+function inferFeedbackLevelFromStatus(
+  message: string,
+  outputLevel: OutputLevel,
+): FeedbackLevel {
+  if (outputLevel === "error") {
+    return "error";
+  }
+
+  if (outputLevel === "warning") {
+    return "warning";
+  }
+
+  if (SUCCESS_STATUS_PATTERNS.some((pattern) => pattern.test(message))) {
+    return "success";
+  }
+
+  return "info";
+}
+
+function shouldShowToastForStatus(message: string, outputLevel: OutputLevel): boolean {
+  if (outputLevel === "debug") {
+    return false;
+  }
+
+  return !message.trim().endsWith("...");
 }
 
 type TreeIconTone =
@@ -941,6 +988,8 @@ function App() {
   const [pendingPosition, setPendingPosition] = useState<PendingPosition | null>(null);
   const [editorReadySeq, setEditorReadySeq] = useState(0);
   const [statusMessage, setStatusMessageState] = useState("Ready");
+  const [statusLevel, setStatusLevel] = useState<FeedbackLevel>("info");
+  const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [outputState, setOutputState] = useState(() => createInitialOutputStoreState());
   const [outputLevelFilter, setOutputLevelFilter] = useState<OutputLevel | "all">("all");
   const [monacoDiagnosticsByPath, setMonacoDiagnosticsByPath] = useState<Record<string, EditorDiagnostic[]>>({});
@@ -986,6 +1035,7 @@ function App() {
   const explorerResizePointerIdRef = useRef<number | null>(null);
   const explorerLastVisibleWidthRef = useRef(EXPLORER_DEFAULT_WIDTH);
   const treeInlineEditIdRef = useRef(0);
+  const toastTimeoutByIdRef = useRef<Record<string, number>>({});
   const rustLspVersionByPathRef = useRef<Record<string, number>>({});
   const rustLspLastPathRef = useRef<string | null>(null);
   const rustLspClientRef = useRef<ReturnType<typeof createRustLspClient> | null>(null);
@@ -1041,16 +1091,70 @@ function App() {
     );
   }, []);
 
+  const dismissToast = useCallback((id: string) => {
+    const timeoutId = toastTimeoutByIdRef.current[id];
+    if (typeof timeoutId === "number") {
+      window.clearTimeout(timeoutId);
+      delete toastTimeoutByIdRef.current[id];
+    }
+
+    setToasts((previous) => previous.filter((toast) => toast.id !== id));
+  }, []);
+
+  const pushToast = useCallback((
+    message: string,
+    level: FeedbackLevel,
+    durationMs?: number,
+  ) => {
+    const resolvedDurationMs = Math.max(
+      1200,
+      durationMs ?? TOAST_DURATION_MS_BY_LEVEL[level] ?? DEFAULT_TOAST_DURATION_MS,
+    );
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    setToasts((previous) => [
+      ...previous.slice(-(MAX_VISIBLE_TOASTS - 1)),
+      {
+        id,
+        level,
+        message,
+        createdAt: Date.now(),
+        durationMs: resolvedDurationMs,
+      },
+    ]);
+
+    const timeoutId = window.setTimeout(() => {
+      setToasts((previous) => previous.filter((toast) => toast.id !== id));
+      delete toastTimeoutByIdRef.current[id];
+    }, resolvedDurationMs);
+    toastTimeoutByIdRef.current[id] = timeoutId;
+  }, []);
+
   const setStatusMessage = useCallback((
     message: string,
     level?: OutputLevel,
     channel: "system" | "lsp" | "terminal" | "workspace" = "system",
+    options?: {
+      feedbackLevel?: FeedbackLevel;
+      toastDurationMs?: number;
+      showToast?: boolean;
+    },
   ) => {
+    const resolvedOutputLevel = level ?? inferOutputLevelFromMessage(message);
+    const resolvedFeedbackLevel = options?.feedbackLevel ?? inferFeedbackLevelFromStatus(
+      message,
+      resolvedOutputLevel,
+    );
     setStatusMessageState(message);
-    appendOutput(message, level ?? inferOutputLevelFromMessage(message), channel, {
+    setStatusLevel(resolvedFeedbackLevel);
+    appendOutput(message, resolvedOutputLevel, channel, {
       dedupeKey: `${channel}:${message}`,
     });
-  }, [appendOutput]);
+    const shouldShowToast = options?.showToast ?? shouldShowToastForStatus(message, resolvedOutputLevel);
+    if (shouldShowToast) {
+      pushToast(message, resolvedFeedbackLevel, options?.toastDurationMs);
+    }
+  }, [appendOutput, pushToast]);
 
   const syncActiveMonacoDiagnostics = useCallback(() => {
     const monacoApi = monacoApiRef.current;
@@ -1130,6 +1234,16 @@ function App() {
   useEffect(() => {
     terminalBuffersRef.current = terminalBuffers;
   }, [terminalBuffers]);
+
+  useEffect(() => {
+    return () => {
+      const timeoutIds = Object.values(toastTimeoutByIdRef.current);
+      timeoutIds.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+      toastTimeoutByIdRef.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     // 设置默认暗色主题
@@ -1375,6 +1489,36 @@ function App() {
     () => Object.values(gitLoadingByAction).some((value) => value),
     [gitLoadingByAction],
   );
+  const activeTerminalSession = useMemo(
+    () => terminals.find((session) => session.id === activeTerminalId) ?? null,
+    [terminals, activeTerminalId],
+  );
+  const statusBarFileInfo = useMemo<StatusBarFileInfo | null>(() => {
+    if (!activeFileTab) {
+      return null;
+    }
+
+    const relativePath = workspace
+      ? relativePathWithinWorkspace(activeFileTab.path, workspace.rootPath)
+      : activeFileTab.path;
+    return {
+      title: activeFileTab.title,
+      path: relativePath,
+      language: activeFileTab.language,
+      isDirty: tabIsDirty(activeFileTab),
+    };
+  }, [activeFileTab, workspace]);
+  const statusBarTerminalInfo = useMemo<StatusBarTerminalInfo | null>(() => {
+    if (!activeTerminalSession) {
+      return null;
+    }
+
+    return {
+      title: activeTerminalSession.title,
+      cwd: activeTerminalSession.cwd,
+      status: activeTerminalSession.status,
+    };
+  }, [activeTerminalSession]);
 
   useEffect(() => {
     const client = createRustLspClient({
@@ -4155,6 +4299,17 @@ function App() {
           </section>
         </section>
       </div>
+
+      <StatusBar
+        statusMessage={statusMessage}
+        statusLevel={statusLevel}
+        workspaceName={workspace?.rootName ?? null}
+        activeWorkbenchTabKind={activeWorkbenchTabKind}
+        activeFile={statusBarFileInfo}
+        activeTerminal={statusBarTerminalInfo}
+      />
+
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
 
       <section ref={signalsPanelRef} className="signals-panel-anchor">
         <SignalsPanel

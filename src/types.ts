@@ -226,6 +226,29 @@ export interface EditorSignalState {
   activeTab: SignalsPanelTab;
 }
 
+export type FeedbackLevel = "success" | "error" | "warning" | "info";
+
+export interface ToastNotification {
+  id: string;
+  level: FeedbackLevel;
+  message: string;
+  createdAt: number;
+  durationMs: number;
+}
+
+export interface StatusBarFileInfo {
+  title: string;
+  path: string;
+  language: LanguageId;
+  isDirty: boolean;
+}
+
+export interface StatusBarTerminalInfo {
+  title: string;
+  cwd: string;
+  status: string;
+}
+
 export interface LspSessionInfo {
   id: string;
   server: string;
