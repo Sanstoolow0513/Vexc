@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -13,11 +13,16 @@ use std::{
 };
 use tauri::Emitter;
 
+type TerminalSessionMap = Arc<Mutex<HashMap<String, Arc<Mutex<TerminalState>>>>>;
+type LspSessionMap = Arc<Mutex<HashMap<String, Arc<Mutex<LspSessionState>>>>>;
+
 #[derive(Default)]
 struct AppState {
     workspace_root: Mutex<Option<PathBuf>>,
-    terminals: Arc<Mutex<HashMap<String, Arc<Mutex<TerminalState>>>>>,
+    terminals: TerminalSessionMap,
     terminal_counter: AtomicU64,
+    lsp_sessions: LspSessionMap,
+    lsp_counter: AtomicU64,
 }
 
 struct TerminalState {
@@ -34,8 +39,18 @@ struct TerminalState {
     process: Box<dyn portable_pty::Child + Send>,
 }
 
+struct LspSessionState {
+    id: String,
+    server: String,
+    root_path: PathBuf,
+    status: String,
+    writer: ChildStdin,
+    process: Child,
+}
+
 const MAX_EDITOR_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_TERMINAL_BUFFER_BYTES: usize = 1024 * 1024;
+const MAX_LSP_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 30;
 const IGNORED_DIRECTORY_NAMES: &[&str] = &["node_modules", "dist", "target"];
@@ -136,6 +151,15 @@ struct GitRepoStatus {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct LspSessionInfo {
+    id: String,
+    server: String,
+    root_path: String,
+    status: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct GitChange {
     path: String,
     old_path: Option<String>,
@@ -187,6 +211,15 @@ struct GitDiffResult {
     path: String,
     staged: bool,
     diff: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LspMessageEvent {
+    session_id: String,
+    channel: String,
+    payload: String,
+    is_error: bool,
 }
 
 #[derive(Serialize)]
@@ -936,6 +969,124 @@ fn git_checkout(
 }
 
 #[tauri::command]
+fn lsp_start(
+    server: String,
+    args: Option<Vec<String>>,
+    root_path: String,
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<LspSessionInfo, String> {
+    let server_name = server.trim();
+    if server_name.is_empty() {
+        return Err(String::from("LSP server command cannot be empty"));
+    }
+
+    let resolved_root = if root_path.trim().is_empty() {
+        get_workspace_root(&state)?
+    } else {
+        canonicalize_dir_path(&root_path)?
+    };
+
+    if let Some(workspace_root) = get_workspace_root_optional(&state)? {
+        ensure_inside_workspace(&resolved_root, &workspace_root)?;
+    }
+
+    let mut command = Command::new(server_name);
+    if let Some(values) = args {
+        command.args(values);
+    }
+    command
+        .current_dir(&resolved_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut process = command
+        .spawn()
+        .map_err(|error| format!("Failed to start LSP server `{server_name}`: {error}"))?;
+
+    let writer = process
+        .stdin
+        .take()
+        .ok_or_else(|| String::from("Failed to capture LSP server stdin"))?;
+    let stdout = process
+        .stdout
+        .take()
+        .ok_or_else(|| String::from("Failed to capture LSP server stdout"))?;
+    let stderr = process
+        .stderr
+        .take()
+        .ok_or_else(|| String::from("Failed to capture LSP server stderr"))?;
+
+    let id = format!(
+        "lsp-{}",
+        state.lsp_counter.fetch_add(1, Ordering::SeqCst) + 1
+    );
+    let lsp_session = Arc::new(Mutex::new(LspSessionState {
+        id: id.clone(),
+        server: server_name.to_string(),
+        root_path: resolved_root.clone(),
+        status: String::from("running"),
+        writer,
+        process,
+    }));
+
+    {
+        let mut lsp_guard = state
+            .lsp_sessions
+            .lock()
+            .map_err(|_| String::from("Failed to lock LSP state"))?;
+        lsp_guard.insert(id.clone(), lsp_session.clone());
+    }
+
+    spawn_lsp_stdout_reader(id.clone(), stdout, state.lsp_sessions.clone(), app.clone());
+    spawn_lsp_stderr_reader(id.clone(), stderr, state.lsp_sessions.clone(), app.clone());
+
+    let session_guard = lsp_session
+        .lock()
+        .map_err(|_| String::from("Failed to lock LSP session"))?;
+
+    Ok(lsp_state_to_info(&session_guard))
+}
+
+#[tauri::command]
+fn lsp_send(
+    session_id: String,
+    payload: String,
+    state: tauri::State<AppState>,
+) -> Result<Ack, String> {
+    if payload.trim().is_empty() {
+        return Err(String::from("LSP payload cannot be empty"));
+    }
+
+    let session = get_lsp_session(&state, &session_id)?;
+    let mut session_guard = session
+        .lock()
+        .map_err(|_| String::from("Failed to lock LSP session"))?;
+
+    if session_guard.status != "running" {
+        return Err(String::from("LSP session is not running"));
+    }
+
+    let payload_bytes = payload.as_bytes();
+    let header = format!("Content-Length: {}\r\n\r\n", payload_bytes.len());
+    session_guard
+        .writer
+        .write_all(header.as_bytes())
+        .map_err(|error| format!("Failed to write LSP header: {error}"))?;
+    session_guard
+        .writer
+        .write_all(payload_bytes)
+        .map_err(|error| format!("Failed to write LSP payload: {error}"))?;
+    session_guard
+        .writer
+        .flush()
+        .map_err(|error| format!("Failed to flush LSP payload: {error}"))?;
+
+    Ok(Ack { ok: true })
+}
+
+#[tauri::command]
 fn git_pull(state: tauri::State<AppState>) -> Result<GitCommandResult, String> {
     let root = get_workspace_root(&state)?;
     ensure_workspace_is_git_repository(&root)?;
@@ -983,6 +1134,28 @@ fn git_diff(
         staged: is_staged,
         diff: command_result.stdout,
     })
+}
+
+#[tauri::command]
+fn lsp_stop(session_id: String, state: tauri::State<AppState>) -> Result<Ack, String> {
+    let removed = {
+        let mut lsp_guard = state
+            .lsp_sessions
+            .lock()
+            .map_err(|_| String::from("Failed to lock LSP state"))?;
+        lsp_guard.remove(&session_id)
+    };
+
+    if let Some(session) = removed {
+        let mut guard = session
+            .lock()
+            .map_err(|_| String::from("Failed to lock LSP session"))?;
+        guard.status = String::from("closed");
+        let _ = guard.process.kill();
+        let _ = guard.process.wait();
+    }
+
+    Ok(Ack { ok: true })
 }
 
 #[tauri::command]
@@ -1116,6 +1289,47 @@ fn get_terminal_session(
         .ok_or_else(|| String::from("Terminal session not found"))
 }
 
+fn lsp_state_to_info(state: &LspSessionState) -> LspSessionInfo {
+    LspSessionInfo {
+        id: state.id.clone(),
+        server: state.server.clone(),
+        root_path: state.root_path.to_string_lossy().to_string(),
+        status: state.status.clone(),
+    }
+}
+
+fn get_lsp_session(
+    state: &tauri::State<AppState>,
+    session_id: &str,
+) -> Result<Arc<Mutex<LspSessionState>>, String> {
+    let lsp_guard = state
+        .lsp_sessions
+        .lock()
+        .map_err(|_| String::from("Failed to lock LSP state"))?;
+
+    lsp_guard
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| String::from("LSP session not found"))
+}
+
+fn cleanup_lsp_session_on_disconnect(sessions: &LspSessionMap, session_id: &str) {
+    let removed = match sessions.lock() {
+        Ok(mut session_guard) => session_guard.remove(session_id),
+        Err(_) => None,
+    };
+
+    if let Some(session) = removed {
+        if let Ok(mut lsp_guard) = session.lock() {
+            if lsp_guard.status == "running" {
+                lsp_guard.status = String::from("disconnected");
+            }
+            let _ = lsp_guard.process.kill();
+            let _ = lsp_guard.process.wait();
+        }
+    }
+}
+
 fn build_terminal_spawn_command(shell: &str, cwd: &Path) -> CommandBuilder {
     let shell_lower = shell.to_lowercase();
     let mut command = CommandBuilder::new(shell);
@@ -1132,7 +1346,7 @@ fn build_terminal_spawn_command(shell: &str, cwd: &Path) -> CommandBuilder {
 fn spawn_terminal_reader(
     session_id: String,
     mut reader: Box<dyn Read + Send>,
-    terminals: Arc<Mutex<HashMap<String, Arc<Mutex<TerminalState>>>>>,
+    terminals: TerminalSessionMap,
     app: tauri::AppHandle,
 ) {
     std::thread::spawn(move || {
@@ -1205,6 +1419,136 @@ fn spawn_terminal_reader(
             }
         }
     });
+}
+
+fn spawn_lsp_stdout_reader(
+    session_id: String,
+    stdout: ChildStdout,
+    sessions: LspSessionMap,
+    app: tauri::AppHandle,
+) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+
+        loop {
+            match read_lsp_payload(&mut reader) {
+                Ok(Some(payload)) => {
+                    let _ = app.emit(
+                        "lsp://message",
+                        LspMessageEvent {
+                            session_id: session_id.clone(),
+                            channel: String::from("stdout"),
+                            payload,
+                            is_error: false,
+                        },
+                    );
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = app.emit(
+                        "lsp://message",
+                        LspMessageEvent {
+                            session_id: session_id.clone(),
+                            channel: String::from("system"),
+                            payload: error,
+                            is_error: true,
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        cleanup_lsp_session_on_disconnect(&sessions, &session_id);
+    });
+}
+
+fn spawn_lsp_stderr_reader(
+    session_id: String,
+    stderr: ChildStderr,
+    sessions: LspSessionMap,
+    app: tauri::AppHandle,
+) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let payload = line.trim().to_string();
+                    if payload.is_empty() {
+                        continue;
+                    }
+
+                    let _ = app.emit(
+                        "lsp://message",
+                        LspMessageEvent {
+                            session_id: session_id.clone(),
+                            channel: String::from("stderr"),
+                            payload,
+                            is_error: true,
+                        },
+                    );
+                }
+                Err(error) => {
+                    let _ = app.emit(
+                        "lsp://message",
+                        LspMessageEvent {
+                            session_id: session_id.clone(),
+                            channel: String::from("system"),
+                            payload: format!("Failed to read LSP stderr: {error}"),
+                            is_error: true,
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        cleanup_lsp_session_on_disconnect(&sessions, &session_id);
+    });
+}
+
+fn read_lsp_payload(reader: &mut BufReader<ChildStdout>) -> Result<Option<String>, String> {
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let mut header_line = String::new();
+        let read = reader
+            .read_line(&mut header_line)
+            .map_err(|error| format!("Failed to read LSP header: {error}"))?;
+        if read == 0 {
+            return Ok(None);
+        }
+
+        if header_line == "\r\n" || header_line == "\n" {
+            break;
+        }
+
+        let trimmed = header_line.trim();
+        if let Some(length_text) = trimmed.strip_prefix("Content-Length:") {
+            let parsed = length_text
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("Invalid LSP Content-Length header: {error}"))?;
+            content_length = Some(parsed);
+        }
+    }
+
+    let message_size =
+        content_length.ok_or_else(|| String::from("LSP frame missing Content-Length"))?;
+    if message_size > MAX_LSP_PAYLOAD_BYTES {
+        return Err(format!(
+            "LSP payload exceeds maximum size: {message_size} bytes (limit: {MAX_LSP_PAYLOAD_BYTES} bytes)",
+        ));
+    }
+    let mut payload_bytes = vec![0_u8; message_size];
+    reader
+        .read_exact(&mut payload_bytes)
+        .map_err(|error| format!("Failed to read LSP payload: {error}"))?;
+
+    Ok(Some(String::from_utf8_lossy(&payload_bytes).to_string()))
 }
 
 fn append_terminal_output(output: &mut String, chunk: &str) {
@@ -1983,6 +2327,9 @@ pub fn run() {
             git_pull,
             git_push,
             git_diff,
+            lsp_start,
+            lsp_send,
+            lsp_stop,
             ai_provider_suggestions,
             ai_run
         ])

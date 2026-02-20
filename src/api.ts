@@ -12,6 +12,7 @@ import type {
   GitCommitResult,
   GitDiffResult,
   GitRepoStatus,
+  LspSessionInfo,
   PathResult,
   SaveResult,
   SearchHit,
@@ -155,6 +156,22 @@ export async function gitPush(): Promise<GitCommandResult> {
 
 export async function gitDiff(path: string, staged = false): Promise<GitDiffResult> {
   return invoke<GitDiffResult>("git_diff", { path, staged });
+}
+
+export async function lspStart(
+  server: string,
+  args: string[],
+  rootPath: string,
+): Promise<LspSessionInfo> {
+  return invoke<LspSessionInfo>("lsp_start", { server, args, rootPath });
+}
+
+export async function lspSend(sessionId: string, payload: string): Promise<Ack> {
+  return invoke<Ack>("lsp_send", { sessionId, payload });
+}
+
+export async function lspStop(sessionId: string): Promise<Ack> {
+  return invoke<Ack>("lsp_stop", { sessionId });
 }
 
 export async function aiProviderSuggestions(): Promise<AiProviderSuggestion[]> {

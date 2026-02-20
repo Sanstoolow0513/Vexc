@@ -9,7 +9,7 @@
 ## Stack and Runtime
 - Frontend: React 19 + TypeScript + Vite.
 - Desktop shell: Tauri 2 with Rust (edition 2021).
-- Package manager: `pnpm`.
+- Package manager: `pnpm`.  
 - Frontend entry: `src/main.tsx`.
 - Backend entry: `src-tauri/src/main.rs` and `src-tauri/src/lib.rs`.
 
