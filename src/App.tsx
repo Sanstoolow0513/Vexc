@@ -124,6 +124,7 @@ import {
 } from "./editor/outputStore";
 import { detectLanguage, fileNameFromPath } from "./utils";
 import "./App.css";
+import "./ide-layout-refresh.css";
 
 const WORKSPACE_STORAGE_KEY = "vexc.workspacePath";
 const FONT_SIZE_STORAGE_KEY = "vexc.fontSize";
@@ -139,10 +140,10 @@ const CODE_LINE_HEIGHT = 18;
 const CODE_LINE_HEIGHT_RATIO = CODE_LINE_HEIGHT / CODE_FONT_SIZE;
 const TERMINAL_LINE_HEIGHT_RATIO = 1;
 const MAX_TERMINAL_BUFFER_CHARS = 1024 * 1024;
-const EXPLORER_DEFAULT_WIDTH = 270;
-const EXPLORER_MIN_WIDTH = 180;
-const EXPLORER_RESIZER_WIDTH = 6;
-const EXPLORER_MAIN_PANEL_MIN_WIDTH = 260;
+const EXPLORER_DEFAULT_WIDTH = 288;
+const EXPLORER_MIN_WIDTH = 220;
+const EXPLORER_RESIZER_WIDTH = 4;
+const EXPLORER_MAIN_PANEL_MIN_WIDTH = 360;
 const TREE_POINTER_DRAG_THRESHOLD_PX = 6;
 const MAX_VISIBLE_TOASTS = 4;
 const DEFAULT_TOAST_DURATION_MS = 3400;
@@ -162,26 +163,26 @@ function clampTerminalBuffer(value: string): string {
 }
 
 const DEFAULT_TERMINAL_THEME: ITheme = {
-  background: "#100d0a",
-  foreground: "#e3d6c7",
-  cursor: "#cb8e50",
-  selectionBackground: "rgba(203, 142, 80, 0.24)",
-  black: "#100d0a",
-  red: "#e07a76",
-  green: "#8fc58a",
-  yellow: "#d9b77d",
-  blue: "#8fb7d8",
-  magenta: "#c79874",
-  cyan: "#7fb3a4",
-  white: "#e3d6c7",
-  brightBlack: "#6f5d4b",
-  brightRed: "#ef9a95",
-  brightGreen: "#a9d6a3",
-  brightYellow: "#e6c99a",
-  brightBlue: "#aac7de",
-  brightMagenta: "#ddb091",
-  brightCyan: "#9cc9bd",
-  brightWhite: "#f4eadf",
+  background: "#0f141a",
+  foreground: "#d6deea",
+  cursor: "#5d98ff",
+  selectionBackground: "rgba(93, 152, 255, 0.24)",
+  black: "#0f141a",
+  red: "#ef6b73",
+  green: "#6fca8f",
+  yellow: "#d8b569",
+  blue: "#76a9fa",
+  magenta: "#8ea6ff",
+  cyan: "#56b6c2",
+  white: "#d6deea",
+  brightBlack: "#6b7785",
+  brightRed: "#ff8a93",
+  brightGreen: "#90e3ac",
+  brightYellow: "#e9cd89",
+  brightBlue: "#9ac1ff",
+  brightMagenta: "#adc0ff",
+  brightCyan: "#7fd4df",
+  brightWhite: "#f4f8ff",
 };
 
 function readStoredFontSize(): number {
@@ -1247,7 +1248,7 @@ function App() {
 
   useEffect(() => {
     // 设置默认暗色主题
-    document.documentElement.setAttribute("data-color-theme", "one-dark-pro-orange");
+    document.documentElement.setAttribute("data-color-theme", "dark-plus");
   }, []);
 
   useEffect(() => {
@@ -3650,38 +3651,35 @@ function App() {
             ) : null}
           </div>
 
-          <div className="titlebar-actions" style={{ display: "flex", alignItems: "center", gap: "4px", marginLeft: "auto" }}>
+          <div className="titlebar-actions">
             <button
               type="button"
-              className="menu-tab"
+              className="menu-tab titlebar-action-button"
               title={`减小字体 (${fontSize}px)`}
               aria-label="减小字体"
               onClick={() => adjustFontSize(-1)}
               disabled={fontSize <= MIN_FONT_SIZE}
-              style={{ width: "38px", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
             >
               <AArrowDown size={14} aria-hidden="true" />
             </button>
 
             <button
               type="button"
-              className="menu-tab"
+              className="menu-tab titlebar-action-button"
               title={`增大字体 (${fontSize}px)`}
               aria-label="增大字体"
               onClick={() => adjustFontSize(1)}
               disabled={fontSize >= MAX_FONT_SIZE}
-              style={{ width: "38px", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
             >
               <AArrowUp size={14} aria-hidden="true" />
             </button>
 
             <button
               type="button"
-              className="menu-tab"
+              className="menu-tab titlebar-action-button"
               title={isExplorerVisible ? "隐藏侧边栏" : "显示侧边栏"}
               aria-label="切换侧边栏"
               onClick={() => toggleExplorerVisibility()}
-              style={{ width: "38px", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
             >
               <FolderSearch size={14} aria-hidden="true" />
             </button>
@@ -3757,26 +3755,29 @@ function App() {
           {sidebarView === "explorer" ? (
             <>
               <div className="explorer-toolbar">
-                <button
-                  type="button"
-                  className="explorer-action icon-only"
-                  title="新建文件"
-                  aria-label="新建文件"
-                  disabled={!workspace}
-                  onClick={() => void promptCreateNode("file")}
-                >
-                  <FilePlus2 size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="explorer-action icon-only"
-                  title="新建文件夹"
-                  aria-label="新建文件夹"
-                  disabled={!workspace}
-                  onClick={() => void promptCreateNode("directory")}
-                >
-                  <FolderPlus size={14} />
-                </button>
+                <span className="sidebar-section-title">资源管理器</span>
+                <div className="explorer-toolbar-actions">
+                  <button
+                    type="button"
+                    className="explorer-action icon-only"
+                    title="新建文件"
+                    aria-label="新建文件"
+                    disabled={!workspace}
+                    onClick={() => void promptCreateNode("file")}
+                  >
+                    <FilePlus2 size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="explorer-action icon-only"
+                    title="新建文件夹"
+                    aria-label="新建文件夹"
+                    disabled={!workspace}
+                    onClick={() => void promptCreateNode("directory")}
+                  >
+                    <FolderPlus size={14} />
+                  </button>
+                </div>
               </div>
 
               {workspace ? (
@@ -3894,6 +3895,9 @@ function App() {
             </>
           ) : (
             <div className="scm-panel">
+              <div className="scm-panel-header">
+                <span className="sidebar-section-title">源代码管理</span>
+              </div>
               {!workspace ? (
                 <p className="empty-text">Open a workspace to use source control.</p>
               ) : (
