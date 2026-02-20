@@ -1,6 +1,4 @@
-:root,
-:root[data-color-theme="dark-plus"],
-:root[data-color-theme="one-dark-pro-orange"] {
+:root {
   --bg-deep: #101318;
   --bg-mid: #101318;
   --bg-cosmic: #101318;
@@ -71,40 +69,6 @@
   --shadow-glow-sm: none;
   --shadow-glow-md: none;
   --shadow-glow-lg: none;
-}
-
-:root[data-color-theme="light-plus"] {
-  --bg-deep: #f4f7fb;
-  --bg-mid: #f4f7fb;
-  --bg-cosmic: #f4f7fb;
-  --surface-0: #ffffff;
-  --surface-1: #f7f9fc;
-  --surface-2: #edf2f8;
-  --surface-hover: #e4ebf4;
-  --surface-active: #dce5f0;
-
-  --line-soft: #d4dde7;
-  --line: #c2cedb;
-  --line-strong: #9caac0;
-  --text: #1f2733;
-  --text-secondary: #4f5d6f;
-  --muted: #5f6e81;
-  --accent: #246dff;
-  --accent-hover: #3e81ff;
-  --accent-ink: #ffffff;
-  --accent-border: #2f75ff;
-  --accent-border-hover: #4d8aff;
-  --danger: #c0323c;
-  --danger-surface: rgba(192, 50, 60, 0.12);
-  --focus-ring: rgba(36, 109, 255, 0.24);
-  --selection-bg: rgba(36, 109, 255, 0.22);
-
-  --tab-strip-bg: #f7f9fc;
-  --input-bg: #ffffff;
-  --panel-gradient-top: #f7f9fc;
-  --panel-gradient-bottom: #ffffff;
-  --terminal-bg: #ffffff;
-  --terminal-toolbar-bg: #f2f6fb;
 }
 
 html,

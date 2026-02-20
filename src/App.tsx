@@ -614,8 +614,6 @@ interface FileVisualDescriptor {
   tone: TreeIconTone;
 }
 
-type FileIconThemeId = "vscode-colored" | "vscode-minimal";
-
 function describeDirectoryVisual(name: string, isRoot = false): DirectoryVisualDescriptor {
   if (isRoot) {
     return {
@@ -775,45 +773,12 @@ function describeFileVisual(name: string): FileVisualDescriptor {
   };
 }
 
-function toneForMinimalIcons(tone: TreeIconTone): TreeIconTone {
-  if (tone === "secure" || tone === "media") {
-    return tone;
-  }
-  return "default";
-}
-
 function resolveDirectoryVisual(
   name: string,
   expanded: boolean,
-  iconThemeId: FileIconThemeId,
   isRoot = false,
 ): TreeNodeVisual {
   const descriptor = describeDirectoryVisual(name, isRoot);
-
-  if (iconThemeId === "vscode-minimal") {
-    switch (descriptor.kind) {
-      case "root":
-        return {
-          icon: <FolderRoot size={14} />,
-          tone: "default",
-        };
-      case "git":
-        return {
-          icon: <FolderGit2 size={14} />,
-          tone: "default",
-        };
-      case "secure":
-        return {
-          icon: <FolderLock size={14} />,
-          tone: "secure",
-        };
-      default:
-        return {
-          icon: expanded ? <FolderOpen size={14} /> : <Folder size={14} />,
-          tone: toneForMinimalIcons(descriptor.tone),
-        };
-    }
-  }
 
   switch (descriptor.kind) {
     case "root":
@@ -859,44 +824,8 @@ function resolveDirectoryVisual(
   }
 }
 
-function resolveFileVisual(name: string, iconThemeId: FileIconThemeId): TreeNodeVisual {
+function resolveFileVisual(name: string): TreeNodeVisual {
   const descriptor = describeFileVisual(name);
-
-  if (iconThemeId === "vscode-minimal") {
-    switch (descriptor.kind) {
-      case "secure":
-        return {
-          icon: <FileLock size={14} />,
-          tone: "secure",
-        };
-      case "media":
-        return {
-          icon: <FileImage size={14} />,
-          tone: "media",
-        };
-      case "archive":
-        return {
-          icon: <FileArchive size={14} />,
-          tone: "default",
-        };
-      case "doc-markdown":
-        return {
-          icon: <FilePenLine size={14} />,
-          tone: "default",
-        };
-      case "script":
-      case "docker":
-        return {
-          icon: <FileTerminal size={14} />,
-          tone: "default",
-        };
-      default:
-        return {
-          icon: <FileText size={14} />,
-          tone: toneForMinimalIcons(descriptor.tone),
-        };
-    }
-  }
 
   switch (descriptor.kind) {
     case "secure":
@@ -1244,11 +1173,6 @@ function App() {
       });
       toastTimeoutByIdRef.current = {};
     };
-  }, []);
-
-  useEffect(() => {
-    // 设置默认暗色主题
-    document.documentElement.setAttribute("data-color-theme", "dark-plus");
   }, []);
 
   useEffect(() => {
@@ -3263,8 +3187,8 @@ function App() {
         ? isSamePath(treeDnDState.dragSourcePath, node.path)
         : false;
       const visual = isDirectory
-        ? resolveDirectoryVisual(node.name, expanded, "vscode-colored")
-        : resolveFileVisual(node.name, "vscode-colored");
+        ? resolveDirectoryVisual(node.name, expanded)
+        : resolveFileVisual(node.name);
       const isRenamingNode = treeInlineEdit?.mode === "rename" && isSamePath(treeInlineEdit.targetPath, node.path);
 
       elements.push(
@@ -3586,7 +3510,7 @@ function App() {
     ? isSamePath(treeDnDState.dragSourcePath, workspace.rootPath)
     : false;
   const rootVisual = workspace
-    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, "vscode-colored", true)
+    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, true)
     : null;
   const contextMenuOnRoot = workspace && treeContextMenu
     ? isSamePath(treeContextMenu.path, workspace.rootPath)
