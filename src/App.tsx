@@ -111,6 +111,8 @@ import { HeaderSignals } from "./components/HeaderSignals";
 import { StatusBar } from "./components/StatusBar";
 import { SignalsPanel } from "./components/SignalsPanel";
 import { ToastViewport } from "./components/ToastViewport";
+import { ActivitySidebar } from "./components/ActivitySidebar";
+import { WorkbenchTabStrip } from "./components/WorkbenchTabStrip";
 import { createRustLspClient } from "./editor/lsp/rustLspClient";
 import { MONACO_THEME_NAME, mountMonacoEditor } from "./editor/monacoSetup";
 import {
@@ -2376,7 +2378,7 @@ function App() {
     return (
       <div
         className="tree-item inline-edit"
-        style={{ paddingLeft: `${6 + depth * 11}px` }}
+        style={{ paddingLeft: `${8 + depth * 12}px` }}
         onPointerDown={(event) => event.stopPropagation()}
       >
         <span className="tree-marker tone-default">
@@ -3165,7 +3167,7 @@ function App() {
     ) {
       const createKind: FileKind = treeInlineEdit.mode === "create-file" ? "file" : "directory";
       elements.push(
-        <div key={`inline-create:${parentDirectoryPath}:${treeInlineEdit.id}`}>
+        <div key={`inline-create:${parentDirectoryPath}:${treeInlineEdit.id}`} className="tree-row">
           {renderTreeInlineEditor(treeInlineEdit, depth, createKind)}
         </div>,
       );
@@ -3194,6 +3196,7 @@ function App() {
       elements.push(
         <div
           key={node.path}
+          className="tree-row"
           data-tree-drop-path={isDirectory ? node.path : undefined}
         >
           {isRenamingNode
@@ -3206,7 +3209,7 @@ function App() {
                 } ${isDraggingSource ? "dragging-source" : ""} ${
                   isValidDropTarget ? "drop-target-valid drop-target" : ""
                 } ${isInvalidDropTarget ? "drop-target-invalid" : ""}`}
-                style={{ paddingLeft: `${6 + depth * 11}px` }}
+                style={{ paddingLeft: `${8 + depth * 12}px` }}
                 disabled={loading || openingFile}
                 onPointerDown={(event) => handleTreePointerDown(event, { path: node.path, kind: node.kind })}
                 onContextMenu={(event) => openTreeContextMenu(event, node.path, node.kind)}
@@ -3651,29 +3654,11 @@ function App() {
       </header>
 
       <div ref={workbenchGridRef} className={workbenchClassName} style={workbenchStyle}>
-        <nav className="activity-bar" aria-label="侧边栏视图">
-          <button
-            type="button"
-            className={`activity-button ${sidebarView === "explorer" ? "active" : ""}`}
-            aria-label="资源管理器"
-            title="资源管理器"
-            onClick={() => activateSidebarView("explorer")}
-          >
-            <FolderSearch size={18} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className={`activity-button ${sidebarView === "scm" ? "active" : ""}`}
-            aria-label="源代码管理"
-            title="源代码管理"
-            onClick={() => activateSidebarView("scm")}
-          >
-            <FolderGit2 size={18} aria-hidden="true" />
-            {gitChangesState.length > 0 ? (
-              <span className="activity-badge">{gitChangesState.length > 99 ? "99+" : gitChangesState.length}</span>
-            ) : null}
-          </button>
-        </nav>
+        <ActivitySidebar
+          sidebarView={sidebarView}
+          gitChangeCount={gitChangesState.length}
+          onActivateSidebarView={activateSidebarView}
+        />
 
         <aside className="explorer-panel">
           {sidebarView === "explorer" ? (
@@ -3707,6 +3692,7 @@ function App() {
               {workspace ? (
                 <div className="explorer-root">
                   <div
+                    className="tree-row tree-row-root"
                     data-tree-drop-path={workspace.rootPath}
                   >
                     <button
@@ -4128,65 +4114,23 @@ function App() {
 
         <section className="main-panel">
           <section className="editor-panel">
-            <div className="tab-strip">
-              <div className="tab-strip-scroll">
-                {tabs.map((tab) => (
-                  <div
-                    key={tab.id}
-                    className={`tab-item ${isFileTabActive && tab.id === activeTabId ? "active" : ""}`}
-                  >
-                    <button
-                      type="button"
-                      className="tab-button"
-                      onClick={() => {
-                        setActiveWorkbenchTabKind("file");
-                        setActiveTabId(tab.id);
-                      }}
-                    >
-                      {tab.title}
-                      {tabIsDirty(tab) ? " *" : ""}
-                    </button>
-                    <button type="button" className="tab-close" onClick={() => closeTab(tab.id)}>
-                      <X size={14} className="tab-close-icon" />
-                    </button>
-                  </div>
-                ))}
-
-                {terminals.map((session) => (
-                  <div
-                    key={session.id}
-                    className={`tab-item terminal ${
-                      activeWorkbenchTabKind === "terminal" && session.id === activeTerminalId ? "active" : ""
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      className="tab-button terminal"
-                      onClick={() => void selectTerminal(session.id)}
-                      title={session.cwd}
-                    >
-                      <span className={`tab-dot ${session.status === "running" ? "running" : "stopped"}`} />
-                      <span className="tab-title-text">{session.title}</span>
-                    </button>
-                    <button type="button" className="tab-close" onClick={() => void closeTerminalTab(session.id)}>
-                      <X size={14} className="tab-close-icon" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              <div className="tab-strip-actions">
-                <button
-                  type="button"
-                  className="tab-add"
-                  title="新建终端"
-                  aria-label="新建终端"
-                  onClick={() => void createTerminalSession()}
-                >
-                  <FileTerminal size={13} aria-hidden="true" />
-                </button>
-              </div>
-            </div>
+            <WorkbenchTabStrip
+              tabs={tabs}
+              terminals={terminals}
+              isFileTabActive={isFileTabActive}
+              activeTabId={activeTabId}
+              activeWorkbenchTabKind={activeWorkbenchTabKind}
+              activeTerminalId={activeTerminalId}
+              tabIsDirty={tabIsDirty}
+              onSelectFileTab={(tabId) => {
+                setActiveWorkbenchTabKind("file");
+                setActiveTabId(tabId);
+              }}
+              onCloseFileTab={closeTab}
+              onSelectTerminal={(terminalId) => void selectTerminal(terminalId)}
+              onCloseTerminal={(terminalId) => void closeTerminalTab(terminalId)}
+              onCreateTerminal={() => void createTerminalSession()}
+            />
 
             <div className="editor-surface">
               {isFileTabActive && activeTab ? (

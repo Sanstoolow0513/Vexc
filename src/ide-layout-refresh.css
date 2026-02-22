@@ -375,7 +375,7 @@ body.explorer-resizing .explorer-resizer::before {
 }
 
 .explorer-root {
-  padding: var(--space-sm) 6px;
+  padding: 4px;
   scrollbar-width: thin;
 }
 
@@ -386,17 +386,50 @@ body.explorer-resizing .explorer-resizer::before {
 }
 
 .tree-item {
+  width: 100%;
   min-height: 28px;
   border-radius: var(--radius-sm);
-  gap: var(--space-sm);
-  padding: 0 var(--space-sm);
+  gap: 8px;
+  padding: 0 8px;
   font-size: 12px;
+  line-height: 1.3;
 }
 
 .tree-item.root {
-  margin-bottom: var(--space-sm);
+  min-height: 30px;
+  margin-bottom: 4px;
+  padding-right: 8px;
   border-color: var(--line);
   background: var(--surface-0);
+}
+
+.tree-marker {
+  width: 14px;
+  height: 14px;
+}
+
+.tree-marker svg {
+  width: 14px;
+  height: 14px;
+}
+
+.tree-label {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.tree-inline-input {
+  height: 24px;
+  font-size: 12px;
+  padding: 0 8px;
+  border-radius: 6px;
+}
+
+.tree-loading {
+  margin-left: auto;
+  font-size: 11px;
 }
 
 .tree-item:hover,
@@ -409,7 +442,7 @@ body.explorer-resizing .explorer-resizer::before {
 .tree-item.active,
 .tree-item.selected {
   border-color: var(--accent-border);
-  background: rgba(93, 152, 255, 0.18);
+  background: rgba(93, 152, 255, 0.22);
   box-shadow: none;
 }
 
@@ -785,4 +818,155 @@ body.explorer-resizing .explorer-resizer::before {
     width: 42px;
     min-width: 42px;
   }
+}
+
+/* Borderless + Rhythm pass */
+:root {
+  --line-soft: transparent;
+  --line: transparent;
+  --line-strong: transparent;
+  --height-sm: 24px;
+  --height-base: 32px;
+  --height-lg: 36px;
+  --height-xl: 40px;
+}
+
+button,
+input,
+select,
+textarea,
+.window-bar,
+.window-controls,
+.window-control,
+.activity-bar,
+.explorer-panel,
+.explorer-toolbar,
+.editor-panel,
+.tab-strip,
+.tab-item,
+.status-bar,
+.status-level-chip,
+.status-meta-chip,
+.menu-panel,
+.signals-panel,
+.signals-panel-header,
+.signals-panel-subheader,
+.toast-item,
+.tree-context-menu,
+.tree-context-item,
+.scm-toolbar,
+.scm-button,
+.scm-branch-select,
+.scm-commit-input,
+.scm-diff-content {
+  border: 0;
+  box-shadow: none;
+}
+
+button:hover,
+.menu-tab:hover,
+.header-menu.active .menu-tab,
+.activity-button:hover,
+.activity-button.active,
+.explorer-action:hover,
+.tab-button:hover,
+.tab-add:hover,
+.tab-close:hover,
+.tree-item:hover,
+.tree-item.active,
+.tree-item.selected,
+.scm-change-main:hover,
+.scm-button:hover,
+.signals-tab.active {
+  border: 0;
+  box-shadow: none;
+}
+
+.window-bar,
+.explorer-toolbar,
+.status-bar {
+  min-height: 40px;
+  padding-left: var(--space-sm);
+  padding-right: var(--space-sm);
+}
+
+.tab-strip {
+  padding: 0;
+}
+
+.activity-bar {
+  padding: var(--space-sm);
+  gap: var(--space-sm);
+}
+
+.menu-tab,
+.titlebar-action-button,
+.signals-trigger,
+.activity-button,
+.explorer-action.icon-only,
+.tab-add {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.window-control {
+  width: 42px;
+  min-width: 42px;
+}
+
+.tab-item {
+  border-right: 0;
+}
+
+.tab-item.active {
+  background: rgba(93, 152, 255, 0.2);
+}
+
+.tab-item.active::before {
+  display: none;
+}
+
+.tab-button,
+.tab-close {
+  height: 32px;
+}
+
+.tree-row {
+  min-height: calc(var(--font-size-sm) * 1.5);
+}
+
+.tree-row-root {
+  margin-bottom: 8px;
+}
+
+.tree-item {
+  min-height: 0;
+  height: 100%;
+  padding: 0 8px;
+  gap: 8px;
+}
+
+.tree-item.root {
+  margin-bottom: 0;
+}
+
+.scm-panel {
+  gap: var(--space-lg);
+  padding: var(--space-md);
+}
+
+.scm-change-item {
+  padding: 4px 8px;
+}
+
+.scm-button,
+.scm-change-main {
+  height: 28px;
+}
+
+.editor-surface,
+.terminal-host {
+  border-radius: 0;
 }
