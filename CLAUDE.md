@@ -8,7 +8,7 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 
 **Tech Stack**: Tauri 2, React 19.1.0, Monaco Editor, xterm.js, portable-pty 0.9
 
-**Current Status**: Foundation phase (M0) - workbench layout, editor engine, backend file commands, Git integration, LSP support, and UI/UX features (drag-and-drop file tree, context menus, custom window frame, signals panel, toast notifications).
+**Current Status**: Foundation phase - workbench layout, editor engine, backend file commands, Git integration, LSP support, and UI/UX features (drag-and-drop file tree, context menus, custom window frame, signals panel, toast notifications).
 
 ## Development Commands
 
@@ -24,7 +24,7 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 - `pnpm install` - Install dependencies
 
 ### Testing
-- Frontend: No test framework currently configured (planned for M3 milestone)
+- Frontend: No test framework currently configured
 - Rust: `cargo test` in `src-tauri/` directory
 - Single Rust test: `cargo test <test_name>`
 - Rust test with output: `cargo test <test_name> -- --nocapture`
@@ -36,9 +36,7 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 
 ### Development URLs
 - Frontend dev server: `http://localhost:1420`
-- Tauri automatically updates `tauri.conf.json` devUrl when using `pnpm tauri dev`
 - Vite config: `strictPort: true` (fails if port 1420 unavailable), `clearScreen: false` (preserves Rust error output)
-- Vite ignores `src-tauri/` to prevent interference with Rust builds
 
 ### Platform-Specific
 - Desktop: Works on Windows, macOS, Linux
@@ -64,18 +62,18 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 - `src/editor/outputStore.ts` - Output panel and signals state management
 
 **Feature Modules** (`src/features/`):
-- `src/features/explorer/useTreeDragDrop.ts` - File tree drag-and-drop hook with pointer event handling, drop validation, and click suppression
+- `src/features/explorer/useTreeDragDrop.ts` - File tree drag-and-drop hook
 
 **UI Components** (`src/components/`):
-- `src/components/HeaderSignals.tsx` - Header signals display (problems, output indicators)
+- `src/components/HeaderSignals.tsx` - Header signals display
 - `src/components/SignalsPanel.tsx` - Problems and output panel
 - `src/components/StatusBar.tsx` - Status bar with file and terminal info
 - `src/components/ToastViewport.tsx` - Toast notification system
 
 **UI Dependencies**:
 - `@monaco-editor/react` - Monaco Editor React wrapper
-- `@xterm/xterm` + `@xterm/addon-fit` - Terminal emulation with auto-sizing
-- `lucide-react` - Icon library for UI elements
+- `@xterm/xterm` + `@xterm/addon-fit` - Terminal emulation
+- `lucide-react` - Icon library
 
 **Window Management**:
 - Custom window frame (`decorations: false` in tauri.conf.json)
@@ -87,22 +85,10 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 - Centralized in `App.tsx` using React hooks (useState, useEffect, useMemo)
 - No external state library - uses refs for stale closure prevention
 - Local state stored in `localStorage` for workspace persistence
-- **Refs Sync Pattern**: Critical state values have corresponding refs synchronized via useEffect:
-  ```typescript
-  const [tabs, setTabs] = useState<EditorTab[]>([]);
-  const tabsRef = useRef<EditorTab[]>([]);
-
-  useEffect(() => {
-    tabsRef.current = tabs;
-  }, [tabs]);
-  ```
-  This ensures async callbacks always access the latest state without stale closures.
+- **Refs Sync Pattern**: Critical state values have corresponding refs synchronized via useEffect
 
 **Editor**: Monaco Editor (`@monaco-editor/react`)
-- Custom One Dark Pro theme defined in `monacoSetup.ts` (orange variant)
-- Theme name: `MONACO_THEME_NAME = "vexc-one-dark-pro-orange"`
-- Token colors: keywords (#c678dd), strings (#98c379), functions (#61afef), variables (#e06c75), types (#e5c07b), comments (#5c6370 italic), numbers (#d19a66)
-- Background: #0a0c10, selection: #2c313a
+- Custom One Dark Pro theme defined in `monacoSetup.ts`
 - Font size adjustable via Ctrl+Scroll (persists to localStorage)
 - Language detection via `detectLanguage()` from utils
 
@@ -120,10 +106,9 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 
 **Terminal Integration** (xterm.js + portable-pty):
 - Backend uses `portable-pty 0.9` for cross-platform PTY support
-- Single visible terminal instance switched between sessions via `redrawTerminal()`
+- Single visible terminal instance switched between sessions
 - Real-time output via Tauri 2 event system (`terminal://output`)
 - PowerShell spawns with `-NoLogo -NoProfile` arguments on Windows
-- Terminal write queue serializes input to prevent race conditions
 
 **Git Integration**:
 - Commands: status, changes, stage, unstage, discard, commit, branches, checkout, pull, push, diff
@@ -140,9 +125,9 @@ Vexc is a desktop code editor built with Tauri 2 + React 19 + TypeScript, inspir
 
 ### Backend Structure (Rust + Tauri)
 
-**Entry Point**: `src-tauri/src/lib.rs` - `run()` function registers all commands (2338 lines)
+**Entry Point**: `src-tauri/src/lib.rs` - `run()` function registers all commands (2339 lines)
 
-**Backend Dependencies** (from `src-tauri/Cargo.toml`):
+**Backend Dependencies**:
 - `tauri 2` - Core framework
 - `portable-pty 0.9` - Cross-platform PTY support for terminal sessions
 - `serde` + `serde_json` - Serialization
@@ -218,9 +203,9 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 
 ### UI Layout
 
-**Workbench Grid** (CSS in `src/App.css`):
+**Workbench Grid**:
 - **Top bar**: Workspace controls + header signals + window controls
-- **Left sidebar**: File tree explorer (resizable, min 180px default 270px)
+- **Left sidebar**: File tree explorer (resizable, min 220px default 288px)
 - **Center**: Tab strip + Monaco editor surface
 - **Bottom panel**: Signals panel (problems/output) + Terminal
 - **Status bar**: File info + terminal info + git status
@@ -233,7 +218,7 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 
 **Key UI Patterns**:
 - Lazy-loaded directory tree (fetches children on expand)
-- File tree drag-and-drop with pointer events and threshold detection
+- File tree drag-and-drop with pointer events
 - Tab-based editing with dirty state tracking
 - Toast notifications with auto-dismiss and dedupe keys
 - Signals panel with problems (diagnostics) and output (logs)
@@ -242,7 +227,7 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 
 1. **Workspace Boundary**: All file I/O must validate paths are within workspace root
 2. **Binary File Protection**: Detect and prevent opening binary files (>2MB search, 1MB editor)
-3. **Terminal Session Isolation**: Each terminal maintains its own CWD and line buffer (1,800 lines max)
+3. **Terminal Session Isolation**: Each terminal maintains its own CWD and line buffer
 4. **LSP Session Isolation**: Each LSP server maintains session state and document tracking
 5. **State Synchronization**: Use refs to avoid stale closures in async operations
 6. **Error Messages**: All Rust errors return as `String`, displayed in status bar or toast
@@ -262,11 +247,11 @@ TypeScript types in `src/types.ts` must match Rust structs in `lib.rs`:
 
 **Frontend** (`src/App.tsx`):
 - `WORKSPACE_STORAGE_KEY = "vexc.workspacePath"`
-- `FONT_SIZE_STORAGE_KEY = "vexc.fontSize"`
-- `DEFAULT_FONT_SIZE = 13` (min 10, max 24)
+- `CODE_FONT_SIZE_STORAGE_KEY = "vexc.codeFontSize"`
+- `DEFAULT_CODE_FONT_SIZE = 13` (min 10, max 24)
 - `CODE_FONT_FAMILY = '"JetBrains Mono", "Cascadia Code", Consolas, monospace'`
 - `MAX_TERMINAL_BUFFER_CHARS = 1,048,576`
-- `EXPLORER_DEFAULT_WIDTH = 270` (min 180)
+- `EXPLORER_DEFAULT_WIDTH = 288` (min 220)
 - `TREE_POINTER_DRAG_THRESHOLD_PX = 6`
 - `MAX_VISIBLE_TOASTS = 4`
 - `DEFAULT_TOAST_DURATION_MS = 3400`
@@ -354,4 +339,4 @@ Use Conventional Commit format:
 
 ---
 
-**Last Updated**: 2026-02-20
+**Last Updated**: 2025-02-22
