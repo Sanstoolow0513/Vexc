@@ -195,6 +195,8 @@ export interface EditorDiagnostic {
   path: string;
   line: number;
   column: number;
+  endLine?: number;
+  endColumn?: number;
   severity: DiagnosticSeverity;
   source: string;
   message: string;
@@ -254,6 +256,20 @@ export interface LspSessionInfo {
   server: string;
   rootPath: string;
   status: string;
+}
+
+export type LspServerState = "idle" | "starting" | "running" | "backoff";
+
+export interface LspServerStatus {
+  languageId: LanguageId;
+  server: string;
+  state: LspServerState;
+  sessionId: string | null;
+  workspaceRoot: string | null;
+  openedDocumentCount: number;
+  lastError: string | null;
+  nextRetryAt: number | null;
+  updatedAt: number;
 }
 
 export interface LspMessageEvent {

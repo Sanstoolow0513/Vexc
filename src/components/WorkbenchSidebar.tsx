@@ -16,6 +16,8 @@ import type {
   GitBranchSnapshot,
   GitChange,
   GitRepoStatus,
+  LspServerStatus,
+  LanguageId,
   WorkspaceInfo,
 } from "../types";
 
@@ -27,7 +29,7 @@ interface TreeContextMenuState {
 }
 
 interface WorkbenchSidebarProps {
-  sidebarView: "explorer" | "scm";
+  sidebarView: "explorer" | "scm" | "lsp";
   workspace: WorkspaceInfo | null;
   treeByPath: Record<string, FileNode[]>;
   treeContextMenu: TreeContextMenuState | null;
@@ -41,8 +43,10 @@ interface WorkbenchSidebarProps {
   gitSelectedDiffPath: string | null;
   gitSelectedDiffStaged: boolean;
   gitDiffText: string;
+  lspServerStatuses: readonly LspServerStatus[];
   isGitActionPending: boolean;
   isGitRefreshing: boolean;
+  isLspActionPendingByLanguage: Readonly<Partial<Record<LanguageId, boolean>>>;
   renderTree: (nodes: FileNode[], depth: number, parentDirectoryPath: string) => ReactElement[];
   onCreateNode: (kind: FileKind) => void;
   onTreeContextCreateFile: () => void;
@@ -55,6 +59,10 @@ interface WorkbenchSidebarProps {
   onGitCheckoutBranch: (branchName: string) => void;
   onGitCommitMessageChange: (value: string) => void;
   onGitCommit: () => void;
+  onRefreshLspServers: () => void;
+  onStartLspServer: (languageId: LanguageId) => void;
+  onRestartLspServer: (languageId: LanguageId) => void;
+  onStopLspServer: (languageId: LanguageId) => void;
   onStageGitPaths: (paths: string[]) => void;
   onUnstageGitPaths: (paths: string[]) => void;
   onDiscardGitPaths: (paths: string[]) => void;
@@ -80,8 +88,10 @@ export function WorkbenchSidebar({
   gitSelectedDiffPath,
   gitSelectedDiffStaged,
   gitDiffText,
+  lspServerStatuses,
   isGitActionPending,
   isGitRefreshing,
+  isLspActionPendingByLanguage,
   renderTree,
   onCreateNode,
   onTreeContextCreateFile,
@@ -94,6 +104,10 @@ export function WorkbenchSidebar({
   onGitCheckoutBranch,
   onGitCommitMessageChange,
   onGitCommit,
+  onRefreshLspServers,
+  onStartLspServer,
+  onRestartLspServer,
+  onStopLspServer,
   onStageGitPaths,
   onUnstageGitPaths,
   onDiscardGitPaths,
@@ -103,6 +117,21 @@ export function WorkbenchSidebar({
   isSamePath,
   labelForGitChange,
 }: WorkbenchSidebarProps) {
+  const lspRunningCount = lspServerStatuses.filter((status) => status.state === "running").length;
+
+  function lspStateLabel(state: LspServerStatus["state"]): string {
+    switch (state) {
+      case "running":
+        return "运行中";
+      case "starting":
+        return "启动中";
+      case "backoff":
+        return "重试中";
+      default:
+        return "未连接";
+    }
+  }
+
   return (
     <aside className="explorer-panel">
       {sidebarView === "explorer" ? (
@@ -197,7 +226,7 @@ export function WorkbenchSidebar({
             </div>
           ) : null}
         </>
-      ) : (
+      ) : sidebarView === "scm" ? (
         <div className="scm-panel">
           <div className="scm-panel-header">
             <span className="sidebar-section-title">源代码管理</span>
@@ -488,6 +517,97 @@ export function WorkbenchSidebar({
                 </>
               ) : (
                 <p className="empty-text">Current workspace is not a Git repository.</p>
+              )}
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="lsp-panel">
+          <div className="scm-panel-header">
+            <span className="sidebar-section-title">语言服务</span>
+          </div>
+          {!workspace ? (
+            <p className="empty-text">Open a workspace to inspect language services.</p>
+          ) : (
+            <>
+              <div className="lsp-toolbar">
+                <span className="lsp-summary">运行中 {lspRunningCount}/{lspServerStatuses.length}</span>
+                <button
+                  type="button"
+                  className="scm-button"
+                  onClick={onRefreshLspServers}
+                >
+                  刷新
+                </button>
+              </div>
+
+              {lspServerStatuses.length > 0 ? (
+                <div className="lsp-server-list">
+                  {lspServerStatuses.map((status) => {
+                    const isRunning = status.state === "running";
+                    const pending = Boolean(isLspActionPendingByLanguage[status.languageId]);
+                    const retryInSeconds = status.nextRetryAt
+                      ? Math.max(0, Math.ceil((status.nextRetryAt - Date.now()) / 1000))
+                      : null;
+
+                    return (
+                      <div
+                        key={`lsp:${status.languageId}:${status.server}`}
+                        className={`lsp-server-item state-${status.state}`}
+                      >
+                        <div className="lsp-server-head">
+                          <span className="lsp-server-language">{status.languageId}</span>
+                          <span className={`lsp-server-state state-${status.state}`}>
+                            {lspStateLabel(status.state)}
+                          </span>
+                        </div>
+                        <p className="lsp-server-command" title={status.server}>
+                          {status.server}
+                        </p>
+                        <p className="lsp-server-meta">打开文档 {status.openedDocumentCount}</p>
+                        {status.workspaceRoot ? (
+                          <p className="lsp-server-meta" title={status.workspaceRoot}>
+                            {relativePathWithinWorkspace(status.workspaceRoot, workspace.rootPath)}
+                          </p>
+                        ) : null}
+                        {retryInSeconds !== null ? (
+                          <p className="lsp-server-meta">下次重试 {retryInSeconds}s</p>
+                        ) : null}
+                        {status.lastError ? (
+                          <p className="lsp-server-error" title={status.lastError}>
+                            {status.lastError}
+                          </p>
+                        ) : null}
+                        <div className="lsp-server-actions">
+                          <button
+                            type="button"
+                            className="scm-button"
+                            disabled={pending}
+                            onClick={() => {
+                              if (isRunning) {
+                                onRestartLspServer(status.languageId);
+                                return;
+                              }
+                              onStartLspServer(status.languageId);
+                            }}
+                          >
+                            {isRunning ? "重启" : "连接"}
+                          </button>
+                          <button
+                            type="button"
+                            className="scm-button"
+                            disabled={!isRunning || pending}
+                            onClick={() => onStopLspServer(status.languageId)}
+                          >
+                            停止
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="empty-text">No language servers configured.</p>
               )}
             </>
           )}

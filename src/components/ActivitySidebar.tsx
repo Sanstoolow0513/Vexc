@@ -1,14 +1,16 @@
-import { FolderGit2, FolderSearch } from "lucide-react";
+import { FolderGit2, FolderSearch, Server } from "lucide-react";
 
 interface ActivitySidebarProps {
-  sidebarView: "explorer" | "scm";
+  sidebarView: "explorer" | "scm" | "lsp";
   gitChangeCount: number;
-  onActivateSidebarView: (view: "explorer" | "scm") => void;
+  lspIssueCount: number;
+  onActivateSidebarView: (view: "explorer" | "scm" | "lsp") => void;
 }
 
 export function ActivitySidebar({
   sidebarView,
   gitChangeCount,
+  lspIssueCount,
   onActivateSidebarView,
 }: ActivitySidebarProps) {
   return (
@@ -32,6 +34,18 @@ export function ActivitySidebar({
         <FolderGit2 aria-hidden="true" />
         {gitChangeCount > 0 ? (
           <span className="activity-badge">{gitChangeCount > 99 ? "99+" : gitChangeCount}</span>
+        ) : null}
+      </button>
+      <button
+        type="button"
+        className={`activity-button ${sidebarView === "lsp" ? "active" : ""}`}
+        aria-label="语言服务"
+        title="语言服务"
+        onClick={() => onActivateSidebarView("lsp")}
+      >
+        <Server aria-hidden="true" />
+        {lspIssueCount > 0 ? (
+          <span className="activity-badge">{lspIssueCount > 99 ? "99+" : lspIssueCount}</span>
         ) : null}
       </button>
     </nav>

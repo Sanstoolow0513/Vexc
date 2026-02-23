@@ -39,7 +39,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import type { editor as MonacoEditor } from "monaco-editor";
+import type { IDisposable, editor as MonacoEditor } from "monaco-editor";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -79,7 +79,9 @@ import type {
   EditorDiagnostic,
   EditorTab,
   FeedbackLevel,
+  LanguageId,
   LspMessageEvent,
+  LspServerStatus,
   FileKind,
   FileNode,
   GitBranchSnapshot,
@@ -109,7 +111,12 @@ import { ToastViewport } from "./components/ToastViewport";
 import { ActivitySidebar } from "./components/ActivitySidebar";
 import { WorkbenchTabStrip } from "./components/WorkbenchTabStrip";
 import { WorkbenchSidebar } from "./components/WorkbenchSidebar";
-import { createRustLspClient } from "./editor/lsp/rustLspClient";
+import { getLanguageDefinition } from "./editor/languageRegistry";
+import { createLspManager } from "./editor/lsp/lspManager";
+import {
+  registerMonacoLspProviders,
+  type MonacoLspRequestInput,
+} from "./editor/lsp/monacoLspAdapter";
 import { MONACO_THEME_NAME, mountMonacoEditor } from "./editor/monacoSetup";
 import {
   appendOutputEntry,
@@ -209,7 +216,7 @@ interface PendingPosition {
 }
 
 type WorkbenchTabKind = "file" | "terminal";
-type SidebarView = "explorer" | "scm";
+type SidebarView = "explorer" | "scm" | "lsp";
 
 interface WorkbenchTabTarget {
   kind: WorkbenchTabKind;
@@ -893,6 +900,7 @@ function resolveFileVisual(name: string): TreeNodeVisual {
 
 function App() {
   const [workspace, setWorkspaceState] = useState<WorkspaceInfo | null>(null);
+  const workspaceRef = useRef<WorkspaceInfo | null>(null);
 
   const [treeByPath, setTreeByPath] = useState<Record<string, FileNode[]>>({});
   const [expandedByPath, setExpandedByPath] = useState<Record<string, boolean>>({});
@@ -959,6 +967,8 @@ function App() {
   const [gitDiffText, setGitDiffText] = useState("");
   const [isGitRefreshing, setIsGitRefreshing] = useState(false);
   const [gitLoadingByAction, setGitLoadingByAction] = useState<Record<string, boolean>>({});
+  const [lspServerStatuses, setLspServerStatuses] = useState<LspServerStatus[]>([]);
+  const [lspActionPendingByLanguage, setLspActionPendingByLanguage] = useState<Partial<Record<LanguageId, boolean>>>({});
 
   const appWindow = useMemo(() => getCurrentWindow(), []);
 
@@ -976,9 +986,10 @@ function App() {
   const explorerLastVisibleWidthRef = useRef(EXPLORER_DEFAULT_WIDTH);
   const treeInlineEditIdRef = useRef(0);
   const toastTimeoutByIdRef = useRef<Record<string, number>>({});
-  const rustLspVersionByPathRef = useRef<Record<string, number>>({});
-  const rustLspLastPathRef = useRef<string | null>(null);
-  const rustLspClientRef = useRef<ReturnType<typeof createRustLspClient> | null>(null);
+  const lspVersionByPathRef = useRef<Record<string, number>>({});
+  const lspManagerRef = useRef<ReturnType<typeof createLspManager> | null>(null);
+  const lspProviderDisposablesRef = useRef<IDisposable[]>([]);
+  const lspRequestQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const {
     dndState: treeDnDState,
@@ -1114,12 +1125,14 @@ function App() {
 
     const markers = monacoApi.editor.getModelMarkers({ resource: model.uri });
     const mapped: EditorDiagnostic[] = markers
-      .filter((marker) => marker.owner !== "vexc-rust-lsp")
+      .filter((marker) => !marker.owner.startsWith("vexc-lsp:"))
       .map((marker, index) => ({
         id: `marker:${activeTab.path}:${marker.startLineNumber}:${marker.startColumn}:${index}`,
         path: activeTab.path,
         line: marker.startLineNumber,
         column: marker.startColumn,
+        endLine: marker.endLineNumber,
+        endColumn: marker.endColumn,
         severity: markerSeverityToDiagnosticSeverity(marker.severity),
         source: marker.source ?? "monaco",
         message: marker.message,
@@ -1133,7 +1146,7 @@ function App() {
     }));
   }, [activeTab]);
 
-  const applyRustLspMarkers = useCallback(() => {
+  const applyLspMarkers = useCallback(() => {
     const monacoApi = monacoApiRef.current;
     const editor = monacoEditorRef.current;
     const model = editor?.getModel();
@@ -1156,16 +1169,20 @@ function App() {
       code: diagnostic.code ?? undefined,
       startLineNumber: diagnostic.line,
       startColumn: diagnostic.column,
-      endLineNumber: diagnostic.line,
-      endColumn: diagnostic.column + 1,
+      endLineNumber: diagnostic.endLine ?? diagnostic.line,
+      endColumn: diagnostic.endColumn ?? diagnostic.column + 1,
     }));
 
-    monacoApi.editor.setModelMarkers(model, "vexc-rust-lsp", markers);
+    monacoApi.editor.setModelMarkers(model, `vexc-lsp:${activeTab.language}`, markers);
   }, [activeTab, lspDiagnosticsByPath]);
 
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
@@ -1190,6 +1207,15 @@ function App() {
         window.clearTimeout(timeoutId);
       });
       toastTimeoutByIdRef.current = {};
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      lspProviderDisposablesRef.current.forEach((disposable) => {
+        disposable.dispose();
+      });
+      lspProviderDisposablesRef.current = [];
     };
   }, []);
 
@@ -1478,6 +1504,10 @@ function App() {
     () => Object.values(gitLoadingByAction).some((value) => value),
     [gitLoadingByAction],
   );
+  const lspIssueCount = useMemo(
+    () => lspServerStatuses.filter((status) => status.state === "backoff").length,
+    [lspServerStatuses],
+  );
   const activeTerminalSession = useMemo(
     () => terminals.find((session) => session.id === activeTerminalId) ?? null,
     [terminals, activeTerminalId],
@@ -1510,7 +1540,7 @@ function App() {
   }, [activeTerminalSession]);
 
   useEffect(() => {
-    const client = createRustLspClient({
+    const manager = createLspManager({
       onDiagnostics: (path, diagnostics) => {
         const key = normalizePathForComparison(path);
         setLspDiagnosticsByPath((previous) => ({
@@ -1523,13 +1553,18 @@ function App() {
           dedupeKey: entry.dedupeKey,
         });
       },
+      onServerStatusesChanged: (statuses) => {
+        setLspServerStatuses(statuses);
+      },
     });
 
-    rustLspClientRef.current = client;
+    lspManagerRef.current = manager;
+    setLspServerStatuses(manager.getServerStatuses());
 
     return () => {
-      void client.stop();
-      rustLspClientRef.current = null;
+      void manager.stopAll();
+      lspManagerRef.current = null;
+      setLspServerStatuses([]);
     };
   }, [appendOutput]);
 
@@ -1537,7 +1572,7 @@ function App() {
     let unlisten: (() => void) | null = null;
 
     void listen<LspMessageEvent>("lsp://message", (event) => {
-      rustLspClientRef.current?.handleMessage(event.payload);
+      lspManagerRef.current?.handleMessage(event.payload);
     }).then((dispose) => {
       unlisten = dispose;
     });
@@ -1550,41 +1585,36 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const client = rustLspClientRef.current;
-    if (!client) {
+    const manager = lspManagerRef.current;
+    if (!manager || !workspace || activeWorkbenchTabKind !== "file" || !activeTab) {
       return;
     }
 
-    if (!workspace || activeWorkbenchTabKind !== "file" || !activeTab || activeTab.language !== "rust") {
-      const previousPath = rustLspLastPathRef.current;
-      if (previousPath) {
-        void client.closeDocument(previousPath);
-        rustLspLastPathRef.current = null;
-      }
+    const languageDefinition = getLanguageDefinition(activeTab.language);
+    if (!languageDefinition.lspServerCommand) {
       return;
     }
 
-    const run = async () => {
-      const started = await client.ensureStarted(workspace.rootPath);
-      if (!started) {
-        return;
-      }
+    const key = normalizePathForComparison(activeTab.path);
+    const nextVersion = (lspVersionByPathRef.current[key] ?? 0) + 1;
+    lspVersionByPathRef.current[key] = nextVersion;
 
-      const previousPath = rustLspLastPathRef.current;
-      if (previousPath && !isSamePath(previousPath, activeTab.path)) {
-        await client.closeDocument(previousPath);
-      }
-
-      const key = normalizePathForComparison(activeTab.path);
-      const nextVersion = (rustLspVersionByPathRef.current[key] ?? 0) + 1;
-      rustLspVersionByPathRef.current[key] = nextVersion;
-
-      await client.syncDocument(activeTab.path, activeTab.content, nextVersion);
-      rustLspLastPathRef.current = activeTab.path;
-    };
-
-    void run();
-  }, [activeTab, activeWorkbenchTabKind, workspace]);
+    lspRequestQueueRef.current = lspRequestQueueRef.current
+      .then(async () => {
+        await manager.syncDocument({
+          languageId: activeTab.language,
+          workspaceRoot: workspace.rootPath,
+          path: activeTab.path,
+          text: activeTab.content,
+          version: nextVersion,
+        });
+      })
+      .catch((error) => {
+        appendOutput(`Language service sync failed: ${String(error)}`, "warning", "lsp", {
+          dedupeKey: `lsp-sync-queue:${activeTab.language}:${activeTab.path}`,
+        });
+      });
+  }, [activeTab, activeWorkbenchTabKind, appendOutput, workspace]);
 
   useEffect(() => {
     const monacoApi = monacoApiRef.current;
@@ -1595,7 +1625,7 @@ function App() {
     }
 
     syncActiveMonacoDiagnostics();
-    applyRustLspMarkers();
+    applyLspMarkers();
 
     const modelUri = model.uri.toString();
     const disposable = monacoApi.editor.onDidChangeMarkers((resources) => {
@@ -1607,7 +1637,7 @@ function App() {
     return () => {
       disposable.dispose();
     };
-  }, [activeTab, applyRustLspMarkers, editorReadySeq, syncActiveMonacoDiagnostics]);
+  }, [activeTab, applyLspMarkers, editorReadySeq, syncActiveMonacoDiagnostics]);
 
   function tabIsDirty(tab: EditorTab): boolean {
     return tab.content !== tab.savedContent;
@@ -1825,6 +1855,96 @@ function App() {
     }
   }
 
+  function setLspActionPending(languageId: LanguageId, pending: boolean): void {
+    setLspActionPendingByLanguage((previous) => ({
+      ...previous,
+      [languageId]: pending,
+    }));
+  }
+
+  function refreshLspServerStatuses(): void {
+    const manager = lspManagerRef.current;
+    if (!manager) {
+      setLspServerStatuses([]);
+      return;
+    }
+    setLspServerStatuses(manager.getServerStatuses());
+  }
+
+  async function startLspServer(languageId: LanguageId): Promise<void> {
+    if (!workspace) {
+      setStatusMessage("Open a workspace to start language services.", "warning", "lsp");
+      return;
+    }
+
+    const manager = lspManagerRef.current;
+    if (!manager) {
+      setStatusMessage("Language service manager is not ready yet.", "warning", "lsp");
+      return;
+    }
+
+    setLspActionPending(languageId, true);
+    try {
+      const started = await manager.ensureServer(languageId, workspace.rootPath);
+      if (started) {
+        setStatusMessage(`Language service started: ${languageId}`, "info", "lsp");
+      } else {
+        setStatusMessage(`Language service unavailable: ${languageId}`, "warning", "lsp");
+      }
+    } catch (error) {
+      setStatusMessage(`Failed to start language service ${languageId}: ${String(error)}`, "warning", "lsp");
+    } finally {
+      setLspActionPending(languageId, false);
+      refreshLspServerStatuses();
+    }
+  }
+
+  async function restartLspServer(languageId: LanguageId): Promise<void> {
+    if (!workspace) {
+      setStatusMessage("Open a workspace to restart language services.", "warning", "lsp");
+      return;
+    }
+
+    const manager = lspManagerRef.current;
+    if (!manager) {
+      setStatusMessage("Language service manager is not ready yet.", "warning", "lsp");
+      return;
+    }
+
+    setLspActionPending(languageId, true);
+    try {
+      const started = await manager.restartServer(languageId, workspace.rootPath);
+      if (started) {
+        setStatusMessage(`Language service restarted: ${languageId}`, "info", "lsp");
+      } else {
+        setStatusMessage(`Language service unavailable after restart: ${languageId}`, "warning", "lsp");
+      }
+    } catch (error) {
+      setStatusMessage(`Failed to restart language service ${languageId}: ${String(error)}`, "warning", "lsp");
+    } finally {
+      setLspActionPending(languageId, false);
+      refreshLspServerStatuses();
+    }
+  }
+
+  async function stopLspServer(languageId: LanguageId): Promise<void> {
+    const manager = lspManagerRef.current;
+    if (!manager) {
+      return;
+    }
+
+    setLspActionPending(languageId, true);
+    try {
+      await manager.stopServer(languageId);
+      setStatusMessage(`Language service stopped: ${languageId}`, "info", "lsp");
+    } catch (error) {
+      setStatusMessage(`Failed to stop language service ${languageId}: ${String(error)}`, "warning", "lsp");
+    } finally {
+      setLspActionPending(languageId, false);
+      refreshLspServerStatuses();
+    }
+  }
+
   function hideExplorerPanel(): void {
     setIsExplorerVisible(false);
   }
@@ -1852,6 +1972,11 @@ function App() {
     }
     if (view === "scm" && workspace) {
       void refreshGitState(false);
+      return;
+    }
+
+    if (view === "lsp") {
+      refreshLspServerStatuses();
     }
   }
 
@@ -2104,6 +2229,19 @@ function App() {
   }
 
   function remapPathInTabs(previousPath: string, nextPath: string): void {
+    const remappedTabs = tabsRef.current.filter((tab) => isSameOrDescendantPath(tab.path, previousPath));
+    remappedTabs.forEach((tab) => {
+      const mappedPath = replacePathPrefix(tab.path, previousPath, nextPath);
+      const previousKey = normalizePathForComparison(tab.path);
+      const mappedKey = normalizePathForComparison(mappedPath);
+      const version = lspVersionByPathRef.current[previousKey];
+      if (typeof version === "number") {
+        lspVersionByPathRef.current[mappedKey] = version;
+      }
+      delete lspVersionByPathRef.current[previousKey];
+      void lspManagerRef.current?.closeDocument(tab.language, tab.path);
+    });
+
     setTabs((previous) =>
       previous.map((tab) => {
         if (!isSameOrDescendantPath(tab.path, previousPath)) {
@@ -2231,6 +2369,11 @@ function App() {
     if (tabsToRemove.length === 0) {
       return;
     }
+
+    tabsToRemove.forEach((tab) => {
+      delete lspVersionByPathRef.current[normalizePathForComparison(tab.path)];
+      void lspManagerRef.current?.closeDocument(tab.language, tab.path);
+    });
 
     const nextTabs = existingTabs.filter((tab) => !isSameOrDescendantPath(tab.path, path));
     setTabs(nextTabs);
@@ -2773,7 +2916,7 @@ function App() {
     }
 
     try {
-      await rustLspClientRef.current?.stop();
+      await lspManagerRef.current?.stopAll();
       const info = await setWorkspace(normalizedPath);
       setWorkspaceState(info);
       resetGitState();
@@ -2784,8 +2927,9 @@ function App() {
       setActiveWorkbenchTabKind("file");
       setMonacoDiagnosticsByPath({});
       setLspDiagnosticsByPath({});
-      rustLspVersionByPathRef.current = {};
-      rustLspLastPathRef.current = null;
+      lspVersionByPathRef.current = {};
+      lspRequestQueueRef.current = Promise.resolve();
+      setLspActionPendingByLanguage({});
       openFileRequestsRef.current = {};
       setOpeningFilesByPath({});
 
@@ -2904,6 +3048,12 @@ function App() {
 
       try {
         await writeFile(tab.path, tab.content);
+
+        const currentWorkspace = workspaceRef.current;
+        if (currentWorkspace && getLanguageDefinition(tab.language).lspServerCommand) {
+          await lspManagerRef.current?.saveDocument(tab.language, currentWorkspace.rootPath, tab.path);
+        }
+
         setTabs((previous) =>
           previous.map((item) =>
             item.id === targetId
@@ -2954,6 +3104,10 @@ function App() {
           id: tabId,
         })
       : null;
+
+    const targetKey = normalizePathForComparison(target.path);
+    delete lspVersionByPathRef.current[targetKey];
+    void lspManagerRef.current?.closeDocument(target.language, target.path);
 
     setTabs(nextTabs);
 
@@ -3129,6 +3283,68 @@ function App() {
       mountMonacoEditor(editor, monacoApi, () => {
         void saveTab();
       });
+
+      if (lspProviderDisposablesRef.current.length === 0) {
+        lspProviderDisposablesRef.current = registerMonacoLspProviders(monacoApi, {
+          getWorkspaceRoot: () => workspaceRef.current?.rootPath ?? null,
+          getActivePath: () => {
+            const activeId = activeTabIdRef.current;
+            if (!activeId) {
+              return null;
+            }
+            const tab = tabsRef.current.find((candidate) => candidate.id === activeId);
+            return tab?.path ?? null;
+          },
+          requestHover: async (input: MonacoLspRequestInput) => {
+            try {
+              return await lspManagerRef.current?.requestHover(input) ?? null;
+            } catch {
+              return null;
+            }
+          },
+          requestDefinition: async (input: MonacoLspRequestInput) => {
+            try {
+              return await lspManagerRef.current?.requestDefinition(input) ?? [];
+            } catch {
+              return [];
+            }
+          },
+          requestReferences: async (
+            input: MonacoLspRequestInput,
+            includeDeclaration?: boolean,
+          ) => {
+            try {
+              return await lspManagerRef.current?.requestReferences(input, includeDeclaration ?? true) ?? [];
+            } catch {
+              return [];
+            }
+          },
+          requestCompletion: async (
+            input: MonacoLspRequestInput,
+            triggerCharacter?: string,
+          ) => {
+            try {
+              return await lspManagerRef.current?.requestCompletion(input, triggerCharacter) ?? null;
+            } catch {
+              return null;
+            }
+          },
+          requestSignatureHelp: async (
+            input: MonacoLspRequestInput,
+            triggerCharacter?: string,
+          ) => {
+            try {
+              return await lspManagerRef.current?.requestSignatureHelp(input, triggerCharacter) ?? null;
+            } catch {
+              return null;
+            }
+          },
+          getCompletionTriggerCharacters: (languageId: LanguageId) =>
+            lspManagerRef.current?.getCompletionTriggerCharacters(languageId) ?? [],
+          getSignatureHelpTriggerCharacters: (languageId: LanguageId) =>
+            lspManagerRef.current?.getSignatureHelpTriggerCharacters(languageId) ?? [],
+        });
+      }
     } catch (error) {
       setStatusMessage(`Failed to apply editor theme: ${String(error)}`);
     }
@@ -3739,6 +3955,7 @@ function App() {
         <ActivitySidebar
           sidebarView={sidebarView}
           gitChangeCount={gitChangesState.length}
+          lspIssueCount={lspIssueCount}
           onActivateSidebarView={activateSidebarView}
         />
 
@@ -3757,8 +3974,10 @@ function App() {
           gitSelectedDiffPath={gitSelectedDiffPath}
           gitSelectedDiffStaged={gitSelectedDiffStaged}
           gitDiffText={gitDiffText}
+          lspServerStatuses={lspServerStatuses}
           isGitActionPending={isGitActionPending}
           isGitRefreshing={isGitRefreshing}
+          isLspActionPendingByLanguage={lspActionPendingByLanguage}
           renderTree={renderTree}
           onCreateNode={(kind) => {
             void promptCreateNode(kind);
@@ -3804,6 +4023,16 @@ function App() {
           onGitCommitMessageChange={setGitCommitMessage}
           onGitCommit={() => {
             void handleGitCommitSubmit();
+          }}
+          onRefreshLspServers={refreshLspServerStatuses}
+          onStartLspServer={(languageId) => {
+            void startLspServer(languageId);
+          }}
+          onRestartLspServer={(languageId) => {
+            void restartLspServer(languageId);
+          }}
+          onStopLspServer={(languageId) => {
+            void stopLspServer(languageId);
           }}
           onStageGitPaths={(paths) => {
             void stageGitPaths(paths);

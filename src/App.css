@@ -677,6 +677,42 @@ input:hover:not(:focus) {
   padding: 0 4px;
 }
 
+.signals-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.signals-summary-item {
+  min-width: 26px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  color: var(--text-secondary);
+  background: var(--surface-0);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 6px;
+}
+
+.signals-summary-item.severity-error {
+  border-color: rgba(239, 68, 68, 0.38);
+  color: #fca5a5;
+}
+
+.signals-summary-item.severity-warning {
+  border-color: rgba(245, 158, 11, 0.38);
+  color: #fcd34d;
+}
+
+.signals-summary-item.severity-info {
+  border-color: rgba(59, 130, 246, 0.38);
+  color: #93c5fd;
+}
+
 .signals-close {
   height: 24px;
   border: 1px solid var(--line);
@@ -1679,6 +1715,130 @@ body.explorer-resizing .explorer-resizer::before {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.lsp-panel {
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 8px 10px;
+  overflow: auto;
+}
+
+.lsp-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lsp-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.lsp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lsp-server-item {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lsp-server-item.state-running {
+  border-color: rgba(34, 197, 94, 0.32);
+}
+
+.lsp-server-item.state-starting {
+  border-color: rgba(59, 130, 246, 0.32);
+}
+
+.lsp-server-item.state-backoff {
+  border-color: rgba(245, 158, 11, 0.38);
+}
+
+.lsp-server-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lsp-server-language {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+}
+
+.lsp-server-state {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 0 8px;
+  min-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
+
+.lsp-server-state.state-running {
+  border-color: rgba(34, 197, 94, 0.32);
+  color: #86efac;
+}
+
+.lsp-server-state.state-starting {
+  border-color: rgba(59, 130, 246, 0.38);
+  color: #93c5fd;
+}
+
+.lsp-server-state.state-backoff {
+  border-color: rgba(245, 158, 11, 0.38);
+  color: #fcd34d;
+}
+
+.lsp-server-command {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lsp-server-meta {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.lsp-server-error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--warning);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.lsp-server-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tree-item {
