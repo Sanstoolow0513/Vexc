@@ -1,4 +1,5 @@
 import { AlertTriangle, CheckCircle2, CircleAlert, Info, X } from "lucide-react";
+import { ICON_SIZE_SM } from "../iconSizes";
 
 import type { FeedbackLevel, ToastNotification } from "../types";
 
@@ -16,15 +17,15 @@ function roleForToastLevel(level: FeedbackLevel): "alert" | "status" {
 
 function iconForToastLevel(level: FeedbackLevel) {
   if (level === "success") {
-    return <CheckCircle2 size={15} aria-hidden="true" />;
+    return <CheckCircle2 size={ICON_SIZE_SM} aria-hidden="true" />;
   }
   if (level === "error") {
-    return <CircleAlert size={15} aria-hidden="true" />;
+    return <CircleAlert size={ICON_SIZE_SM} aria-hidden="true" />;
   }
   if (level === "warning") {
-    return <AlertTriangle size={15} aria-hidden="true" />;
+    return <AlertTriangle size={ICON_SIZE_SM} aria-hidden="true" />;
   }
-  return <Info size={15} aria-hidden="true" />;
+  return <Info size={ICON_SIZE_SM} aria-hidden="true" />;
 }
 
 export function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
@@ -44,10 +45,11 @@ export function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
             aria-label="Dismiss notification"
             onClick={() => onDismiss(toast.id)}
           >
-            <X size={14} aria-hidden="true" />
+            <X size={ICON_SIZE_SM} aria-hidden="true" />
           </button>
         </article>
       ))}
     </section>
   );
 }
+

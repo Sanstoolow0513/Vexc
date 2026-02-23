@@ -20,7 +20,7 @@ export function ActivitySidebar({
         title="资源管理器"
         onClick={() => onActivateSidebarView("explorer")}
       >
-        <FolderSearch size={18} aria-hidden="true" />
+        <FolderSearch aria-hidden="true" />
       </button>
       <button
         type="button"
@@ -29,7 +29,7 @@ export function ActivitySidebar({
         title="源代码管理"
         onClick={() => onActivateSidebarView("scm")}
       >
-        <FolderGit2 size={18} aria-hidden="true" />
+        <FolderGit2 aria-hidden="true" />
         {gitChangeCount > 0 ? (
           <span className="activity-badge">{gitChangeCount > 99 ? "99+" : gitChangeCount}</span>
         ) : null}
@@ -37,3 +37,4 @@ export function ActivitySidebar({
     </nav>
   );
 }
+

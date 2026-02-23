@@ -1,4 +1,5 @@
 import { FileTerminal, X } from "lucide-react";
+import { ICON_SIZE_SM } from "../iconSizes";
 
 import type { EditorTab, TerminalSession } from "../types";
 
@@ -48,7 +49,7 @@ export function WorkbenchTabStrip({
               {tabIsDirty(tab) ? " *" : ""}
             </button>
             <button type="button" className="tab-close" onClick={() => onCloseFileTab(tab.id)}>
-              <X size={14} className="tab-close-icon" />
+              <X size={ICON_SIZE_SM} className="tab-close-icon" />
             </button>
           </div>
         ))}
@@ -70,7 +71,7 @@ export function WorkbenchTabStrip({
               <span className="tab-title-text">{session.title}</span>
             </button>
             <button type="button" className="tab-close" onClick={() => onCloseTerminal(session.id)}>
-              <X size={14} className="tab-close-icon" />
+              <X size={ICON_SIZE_SM} className="tab-close-icon" />
             </button>
           </div>
         ))}
@@ -84,9 +85,10 @@ export function WorkbenchTabStrip({
           aria-label="新建终端"
           onClick={onCreateTerminal}
         >
-          <FileTerminal size={13} aria-hidden="true" />
+          <FileTerminal size={ICON_SIZE_SM} aria-hidden="true" />
         </button>
       </div>
     </div>
   );
 }
+

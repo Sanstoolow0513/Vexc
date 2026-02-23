@@ -1,31 +1,12 @@
 import type { editor as MonacoEditor } from "monaco-editor";
 
 import { buildHints } from "../hints";
+import { DEFAULT_THEME } from "../theme/themeConfig";
 import { getLanguageDefinitions } from "./languageRegistry";
 
-export const MONACO_THEME_NAME = "vexc-one-dark-pro-orange";
+export const MONACO_THEME_NAME = DEFAULT_THEME.monacoThemeName;
 
-const DEFAULT_MONACO_THEME: MonacoEditor.IStandaloneThemeData = {
-  base: "vs-dark",
-  inherit: true,
-  rules: [
-    { token: "keyword", foreground: "c678dd" },
-    { token: "variable", foreground: "e06c75" },
-    { token: "string", foreground: "98c379" },
-    { token: "function", foreground: "61afef" },
-    { token: "number", foreground: "d19a66" },
-    { token: "comment", foreground: "5c6370", fontStyle: "italic" },
-    { token: "type", foreground: "e5c07b" },
-  ],
-  colors: {
-    "editor.background": "#0a0c10",
-    "editor.foreground": "#abb2bf",
-    "editorCursor.foreground": "#d19a66",
-    "editor.lineHighlightBackground": "#13161c",
-    "editor.selectionBackground": "#2c313a",
-    "editor.inactiveSelectionBackground": "#1c1f26",
-  },
-};
+const DEFAULT_MONACO_THEME: MonacoEditor.IStandaloneThemeData = DEFAULT_THEME.monacoThemeData;
 
 interface MonacoSetupState {
   initialized: boolean;

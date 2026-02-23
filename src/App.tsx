@@ -20,7 +20,6 @@ import {
   FileCode,
   FileCog,
   FileImage,
-  FilePlus2,
   FileLock,
   FilePenLine,
   FileSpreadsheet,
@@ -34,13 +33,10 @@ import {
   FolderGit2,
   FolderLock,
   FolderOpen,
-  FolderPlus,
   FolderRoot,
   FolderSearch,
   Minus,
-  Pencil,
   Square,
-  Trash2,
   X,
 } from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
@@ -48,7 +44,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal as XtermTerminal, type ITheme } from "@xterm/xterm";
+import { Terminal as XtermTerminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
   createDirectory,
@@ -94,7 +90,6 @@ import type {
   OutputLevel,
   StatusBarFileInfo,
   StatusBarTerminalInfo,
-  SignalsPanelTab,
   ToastNotification,
   TerminalOutputEvent,
   TerminalSession,
@@ -113,34 +108,46 @@ import { SignalsPanel } from "./components/SignalsPanel";
 import { ToastViewport } from "./components/ToastViewport";
 import { ActivitySidebar } from "./components/ActivitySidebar";
 import { WorkbenchTabStrip } from "./components/WorkbenchTabStrip";
+import { WorkbenchSidebar } from "./components/WorkbenchSidebar";
 import { createRustLspClient } from "./editor/lsp/rustLspClient";
 import { MONACO_THEME_NAME, mountMonacoEditor } from "./editor/monacoSetup";
 import {
   appendOutputEntry,
   buildSignalState,
-  clearOutputEntries,
   createInitialOutputStoreState,
   inferOutputLevelFromMessage,
   setOutputPanelOpen,
-  setOutputPanelTab,
 } from "./editor/outputStore";
 import { detectLanguage, fileNameFromPath } from "./utils";
+import { ICON_SIZE_SM } from "./iconSizes";
+import { DEFAULT_THEME, applyThemeCssVariables } from "./theme/themeConfig";
+import {
+  DEFAULT_TYPOGRAPHY_CONFIG,
+  applyTypographyCssVariables,
+  loadTypographyConfig,
+} from "./theme/typographyConfig";
 import "./App.css";
-import "./ide-layout-refresh.css";
 
 const WORKSPACE_STORAGE_KEY = "vexc.workspacePath";
-const FONT_SIZE_STORAGE_KEY = "vexc.fontSize";
+const LEGACY_FONT_SIZE_STORAGE_KEY = "vexc.fontSize";
+const UI_SCALE_STORAGE_KEY = "vexc.uiScale";
+const CODE_FONT_SIZE_STORAGE_KEY = "vexc.codeFontSize";
 
 type HeaderMenuId = "file";
 
-const DEFAULT_FONT_SIZE = 13;
-const MIN_FONT_SIZE = 10;
-const MAX_FONT_SIZE = 24;
-const CODE_FONT_FAMILY = '"JetBrains Mono", "Cascadia Code", Consolas, monospace';
-const CODE_FONT_SIZE = 13;
-const CODE_LINE_HEIGHT = 18;
-const CODE_LINE_HEIGHT_RATIO = CODE_LINE_HEIGHT / CODE_FONT_SIZE;
-const TERMINAL_LINE_HEIGHT_RATIO = 1;
+const DEFAULT_UI_SCALE = 1;
+const MIN_UI_SCALE = 0.85;
+const MAX_UI_SCALE = 1.25;
+const UI_SCALE_STEP = 0.05;
+const UI_ICON_SIZE_SM_BASE = 16;
+const UI_ICON_SIZE_MD_BASE = 20;
+const UI_ICON_SIZE_LG_BASE = 24;
+const UI_ACTIVITY_BAR_WIDTH_BASE = 48;
+const UI_ACTIVITY_BUTTON_SIZE_BASE = 34;
+const UI_ACTIVITY_ICON_SIZE_BASE = 18;
+const UI_ACTIVITY_BAR_PADDING_X_BASE = 6;
+const UI_ACTIVITY_BAR_GAP_BASE = 8;
+const UI_ACTIVITY_BADGE_SIZE_BASE = 14;
 const MAX_TERMINAL_BUFFER_CHARS = 1024 * 1024;
 const EXPLORER_DEFAULT_WIDTH = 288;
 const EXPLORER_MIN_WIDTH = 220;
@@ -157,6 +164,18 @@ const TOAST_DURATION_MS_BY_LEVEL: Record<FeedbackLevel, number> = {
   error: 6000,
 };
 
+function clampUiScale(value: number): number {
+  return Math.max(MIN_UI_SCALE, Math.min(MAX_UI_SCALE, value));
+}
+
+function clampCodeFontSize(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function roundToStep(value: number, step: number): number {
+  return Math.round(value / step) * step;
+}
+
 function clampTerminalBuffer(value: string): string {
   if (value.length <= MAX_TERMINAL_BUFFER_CHARS) {
     return value;
@@ -164,33 +183,23 @@ function clampTerminalBuffer(value: string): string {
   return value.slice(value.length - MAX_TERMINAL_BUFFER_CHARS);
 }
 
-const DEFAULT_TERMINAL_THEME: ITheme = {
-  background: "#0f141a",
-  foreground: "#d6deea",
-  cursor: "#5d98ff",
-  selectionBackground: "rgba(93, 152, 255, 0.24)",
-  black: "#0f141a",
-  red: "#ef6b73",
-  green: "#6fca8f",
-  yellow: "#d8b569",
-  blue: "#76a9fa",
-  magenta: "#8ea6ff",
-  cyan: "#56b6c2",
-  white: "#d6deea",
-  brightBlack: "#6b7785",
-  brightRed: "#ff8a93",
-  brightGreen: "#90e3ac",
-  brightYellow: "#e9cd89",
-  brightBlue: "#9ac1ff",
-  brightMagenta: "#adc0ff",
-  brightCyan: "#7fd4df",
-  brightWhite: "#f4f8ff",
-};
+function readStoredUiScale(): number {
+  const stored = localStorage.getItem(UI_SCALE_STORAGE_KEY);
+  const scale = stored ? Number.parseFloat(stored) : DEFAULT_UI_SCALE;
+  if (!Number.isFinite(scale)) {
+    return DEFAULT_UI_SCALE;
+  }
+  return clampUiScale(scale);
+}
 
-function readStoredFontSize(): number {
-  const stored = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
-  const size = stored ? Number.parseInt(stored, 10) : DEFAULT_FONT_SIZE;
-  return Number.isFinite(size) && size >= MIN_FONT_SIZE && size <= MAX_FONT_SIZE ? size : DEFAULT_FONT_SIZE;
+function readStoredCodeFontSize(defaultSize: number, min: number, max: number): number {
+  const stored = localStorage.getItem(CODE_FONT_SIZE_STORAGE_KEY)
+    ?? localStorage.getItem(LEGACY_FONT_SIZE_STORAGE_KEY);
+  const size = stored ? Number.parseInt(stored, 10) : defaultSize;
+  if (!Number.isFinite(size)) {
+    return defaultSize;
+  }
+  return clampCodeFontSize(size, min, max);
 }
 
 interface PendingPosition {
@@ -439,13 +448,6 @@ const DIAGNOSTIC_SEVERITY_ORDER: Record<EditorDiagnostic["severity"], number> = 
   warning: 1,
   info: 2,
   hint: 3,
-};
-
-const OUTPUT_LEVEL_ORDER: Record<OutputLevel, number> = {
-  error: 0,
-  warning: 1,
-  info: 2,
-  debug: 3,
 };
 
 function markerSeverityToDiagnosticSeverity(severity: number): EditorDiagnostic["severity"] {
@@ -785,42 +787,42 @@ function resolveDirectoryVisual(
   switch (descriptor.kind) {
     case "root":
       return {
-        icon: <FolderRoot size={14} />,
+        icon: <FolderRoot size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "git":
       return {
-        icon: <FolderGit2 size={14} />,
+        icon: <FolderGit2 size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "code":
       return {
-        icon: <FolderCode size={14} />,
+        icon: <FolderCode size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "config":
       return {
-        icon: <FolderCog size={14} />,
+        icon: <FolderCog size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "build":
       return {
-        icon: <FolderArchive size={14} />,
+        icon: <FolderArchive size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "secure":
       return {
-        icon: <FolderLock size={14} />,
+        icon: <FolderLock size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "inspection":
       return {
-        icon: <FolderSearch size={14} />,
+        icon: <FolderSearch size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     default:
       return {
-        icon: expanded ? <FolderOpen size={14} /> : <Folder size={14} />,
+        icon: expanded ? <FolderOpen size={ICON_SIZE_SM} /> : <Folder size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
   }
@@ -832,58 +834,58 @@ function resolveFileVisual(name: string): TreeNodeVisual {
   switch (descriptor.kind) {
     case "secure":
       return {
-        icon: <FileLock size={14} />,
+        icon: <FileLock size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "docker":
     case "script":
       return {
-        icon: <FileTerminal size={14} />,
+        icon: <FileTerminal size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "code":
       return {
-        icon: <FileCode size={14} />,
+        icon: <FileCode size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "sheet":
       return {
-        icon: <FileSpreadsheet size={14} />,
+        icon: <FileSpreadsheet size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "media":
       return {
-        icon: <FileImage size={14} />,
+        icon: <FileImage size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "archive":
       return {
-        icon: <FileArchive size={14} />,
+        icon: <FileArchive size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "config":
       return {
-        icon: <FileCog size={14} />,
+        icon: <FileCog size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "doc-markdown":
       return {
-        icon: <FilePenLine size={14} />,
+        icon: <FilePenLine size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "doc":
       return {
-        icon: <FileText size={14} />,
+        icon: <FileText size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     case "schema":
       return {
-        icon: <FileType size={14} />,
+        icon: <FileType size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
     default:
       return {
-        icon: <File size={14} />,
+        icon: <File size={ICON_SIZE_SM} />,
         tone: descriptor.tone,
       };
   }
@@ -923,7 +925,6 @@ function App() {
   const [statusLevel, setStatusLevel] = useState<FeedbackLevel>("info");
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [outputState, setOutputState] = useState(() => createInitialOutputStoreState());
-  const [outputLevelFilter, setOutputLevelFilter] = useState<OutputLevel | "all">("all");
   const [monacoDiagnosticsByPath, setMonacoDiagnosticsByPath] = useState<Record<string, EditorDiagnostic[]>>({});
   const [lspDiagnosticsByPath, setLspDiagnosticsByPath] = useState<Record<string, EditorDiagnostic[]>>({});
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
@@ -932,7 +933,14 @@ function App() {
   const [isExplorerResizing, setIsExplorerResizing] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>("explorer");
   const [activeWorkbenchTabKind, setActiveWorkbenchTabKind] = useState<WorkbenchTabKind>("file");
-  const [fontSize, setFontSize] = useState<number>(() => readStoredFontSize());
+  const [uiScale, setUiScale] = useState<number>(() => readStoredUiScale());
+  const [typography, setTypography] = useState(DEFAULT_TYPOGRAPHY_CONFIG);
+  const [codeFontSize, setCodeFontSize] = useState<number>(() =>
+    readStoredCodeFontSize(
+      DEFAULT_TYPOGRAPHY_CONFIG.codeFontSize.default,
+      DEFAULT_TYPOGRAPHY_CONFIG.codeFontSize.min,
+      DEFAULT_TYPOGRAPHY_CONFIG.codeFontSize.max,
+    ));
   const [activeHeaderMenuId, setActiveHeaderMenuId] = useState<HeaderMenuId | null>(null);
   const [selectedTreePath, setSelectedTreePath] = useState<string | null>(null);
   const [selectedTreeKind, setSelectedTreeKind] = useState<FileKind | null>(null);
@@ -985,6 +993,14 @@ function App() {
     onDrop: (source, targetDirectoryPath) => handleMoveTreePath(source, targetDirectoryPath),
     onDragStart: () => {
       closeTreeContextMenu();
+    },
+    onDropRejected: (reason) => {
+      const message = reason === "same-path"
+        ? "无法移动到自身"
+        : reason === "target-inside-source"
+          ? "无法将文件夹移动到其自身内部"
+          : "无效的移动目标";
+      setStatusMessage(message);
     },
   });
 
@@ -1178,28 +1194,88 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(fontSize));
+    localStorage.setItem(UI_SCALE_STORAGE_KEY, uiScale.toFixed(2));
+  }, [uiScale]);
+
+  useEffect(() => {
+    applyThemeCssVariables(DEFAULT_THEME.cssVariables);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void loadTypographyConfig()
+      .then((nextTypography) => {
+        if (cancelled) {
+          return;
+        }
+
+        setTypography(nextTypography);
+        const hasStoredCodeFont = Boolean(
+          localStorage.getItem(CODE_FONT_SIZE_STORAGE_KEY)
+          ?? localStorage.getItem(LEGACY_FONT_SIZE_STORAGE_KEY),
+        );
+        if (!hasStoredCodeFont) {
+          setCodeFontSize(
+            clampCodeFontSize(
+              nextTypography.codeFontSize.default,
+              nextTypography.codeFontSize.min,
+              nextTypography.codeFontSize.max,
+            ),
+          );
+        }
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setStatusMessage(`Failed to load typography config: ${String(error)}`, "warning");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setStatusMessage]);
+
+  useEffect(() => {
+    applyTypographyCssVariables(typography);
+  }, [typography]);
+
+  useEffect(() => {
+    const normalizedCodeFontSize = clampCodeFontSize(
+      codeFontSize,
+      typography.codeFontSize.min,
+      typography.codeFontSize.max,
+    );
+
+    if (normalizedCodeFontSize !== codeFontSize) {
+      setCodeFontSize(normalizedCodeFontSize);
+      return;
+    }
+
+    localStorage.setItem(CODE_FONT_SIZE_STORAGE_KEY, String(codeFontSize));
 
     const monacoApi = monacoApiRef.current;
     const editor = monacoEditorRef.current;
     if (monacoApi && editor) {
       try {
-        const lineHeight = Math.round(fontSize * CODE_LINE_HEIGHT_RATIO);
+        const lineHeight = Math.round(codeFontSize * typography.codeLineHeightRatio);
         editor.updateOptions({
-          fontSize: fontSize,
-          lineHeight: lineHeight,
+          fontFamily: typography.codeFontFamily,
+          fontSize: codeFontSize,
+          lineHeight,
         });
       } catch (error) {
         setStatusMessage(`Failed to apply font size: ${String(error)}`);
       }
     }
 
-    // Also update the terminal font size if terminal is initialized
     const terminal = terminalRef.current;
     if (terminal) {
       try {
-        terminal.options.fontSize = fontSize;
-        // Trigger a resize to ensure the terminal adapts to the new font size
+        terminal.options.fontFamily = typography.codeFontFamily;
+        terminal.options.fontSize = codeFontSize;
+        terminal.options.lineHeight = typography.terminalLineHeightRatio;
         setTimeout(() => {
           fitAddonRef.current?.fit();
         }, 0);
@@ -1207,7 +1283,7 @@ function App() {
         setStatusMessage(`Failed to apply terminal font size: ${String(error)}`);
       }
     }
-  }, [fontSize]);
+  }, [codeFontSize, setStatusMessage, typography]);
 
   useEffect(() => {
     if (!activeHeaderMenuId) {
@@ -1381,20 +1457,6 @@ function App() {
     () => problems.filter((problem) => problem.severity === "warning").length,
     [problems],
   );
-
-  const visibleOutputEntries = useMemo(() => {
-    const entries = [...outputState.entries];
-    entries.sort((left, right) => {
-      if (left.timestamp !== right.timestamp) {
-        return right.timestamp - left.timestamp;
-      }
-      return OUTPUT_LEVEL_ORDER[left.level] - OUTPUT_LEVEL_ORDER[right.level];
-    });
-    if (outputLevelFilter === "all") {
-      return entries;
-    }
-    return entries.filter((entry) => entry.level === outputLevelFilter);
-  }, [outputLevelFilter, outputState.entries]);
 
   const signalState = useMemo(
     () => buildSignalState(outputState, problemErrorCount, problemWarningCount),
@@ -1793,32 +1855,26 @@ function App() {
     }
   }
 
-  function adjustFontSize(delta: number): void {
-    setFontSize((previous) => Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, previous + delta)));
+  function adjustUiScale(delta: number): void {
+    setUiScale((previous) => clampUiScale(roundToStep(previous + delta, UI_SCALE_STEP)));
+  }
+
+  function adjustCodeFontSize(delta: number): void {
+    setCodeFontSize((previous) =>
+      clampCodeFontSize(
+        previous + delta,
+        typography.codeFontSize.min,
+        typography.codeFontSize.max,
+      ));
   }
 
   function toggleSignalsPanel(): void {
-    setOutputState((previous) => {
-      const nextPanelOpen = !previous.panelOpen;
-      let next = setOutputPanelOpen(previous, nextPanelOpen);
-      if (nextPanelOpen && problems.length > 0) {
-        next = setOutputPanelTab(next, "problems");
-      }
-      return next;
-    });
+    setOutputState((previous) => setOutputPanelOpen(previous, !previous.panelOpen));
   }
 
   function closeSignalsPanel(): void {
     setOutputState((previous) => setOutputPanelOpen(previous, false));
     monacoEditorRef.current?.focus();
-  }
-
-  function selectSignalsTab(tab: SignalsPanelTab): void {
-    setOutputState((previous) => setOutputPanelTab(previous, tab));
-  }
-
-  function clearSignalOutputs(): void {
-    setOutputState((previous) => clearOutputEntries(previous));
   }
 
   function jumpToProblem(problem: EditorDiagnostic): void {
@@ -2382,7 +2438,7 @@ function App() {
         onPointerDown={(event) => event.stopPropagation()}
       >
         <span className="tree-marker tone-default">
-          {kind === "directory" ? <Folder size={14} /> : <File size={14} />}
+          {kind === "directory" ? <Folder size={ICON_SIZE_SM} /> : <File size={ICON_SIZE_SM} />}
         </span>
         <input
           ref={treeInlineInputRef}
@@ -2435,11 +2491,6 @@ function App() {
 
     if (isSamePath(source.path, targetDirectoryPath)) {
       return "same-path";
-    }
-
-    const sourceParentPath = parentPath(source.path);
-    if (sourceParentPath && isSamePath(sourceParentPath, targetDirectoryPath)) {
-      return "same-parent";
     }
 
     if (source.kind === "directory" && isSameOrDescendantPath(targetDirectoryPath, source.path)) {
@@ -3197,7 +3248,6 @@ function App() {
         <div
           key={node.path}
           className="tree-row"
-          data-tree-drop-path={isDirectory ? node.path : undefined}
         >
           {isRenamingNode
             ? renderTreeInlineEditor(treeInlineEdit, depth, node.kind)
@@ -3210,6 +3260,7 @@ function App() {
                   isValidDropTarget ? "drop-target-valid drop-target" : ""
                 } ${isInvalidDropTarget ? "drop-target-invalid" : ""}`}
                 style={{ paddingLeft: `${8 + depth * 12}px` }}
+                data-tree-drop-path={isDirectory ? node.path : undefined}
                 disabled={loading || openingFile}
                 onPointerDown={(event) => handleTreePointerDown(event, { path: node.path, kind: node.kind })}
                 onContextMenu={(event) => openTreeContextMenu(event, node.path, node.kind)}
@@ -3265,12 +3316,12 @@ function App() {
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "block",
-      fontFamily: CODE_FONT_FAMILY,
-      fontSize: fontSize,
-      lineHeight: TERMINAL_LINE_HEIGHT_RATIO,
+      fontFamily: typography.codeFontFamily,
+      fontSize: codeFontSize,
+      lineHeight: typography.terminalLineHeightRatio,
       allowTransparency: true,
       rightClickSelectsWord: true,
-      theme: DEFAULT_TERMINAL_THEME,
+      theme: DEFAULT_THEME.terminalTheme,
       scrollback: 20000,
     });
 
@@ -3360,7 +3411,7 @@ function App() {
       terminal.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [codeFontSize, typography.codeFontFamily, typography.terminalLineHeightRatio]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -3495,32 +3546,41 @@ function App() {
   }, [activeWorkbenchTabKind, redrawTerminal]);
 
   const workbenchClassName = `workbench-grid${isExplorerVisible ? "" : " explorer-hidden"}`;
-  const workbenchStyle = useMemo(
-    () => ({ "--explorer-width": `${explorerWidth}px` } as CSSProperties),
-    [explorerWidth],
-  );
-  const rootExpanded = workspace ? Boolean(expandedByPath[workspace.rootPath]) : false;
-  const rootSelected = workspace && selectedTreePath
-    ? isSamePath(selectedTreePath, workspace.rootPath)
-    : false;
-  const rootValidDropTarget = workspace && treeDnDState.dropTargetPath
-    ? isSamePath(treeDnDState.dropTargetPath, workspace.rootPath)
-    : false;
-  const rootInvalidDropTarget = workspace && treeDnDState.invalidDropTargetPath
-    ? isSamePath(treeDnDState.invalidDropTargetPath, workspace.rootPath)
-    : false;
-  const rootDraggingSource = workspace && treeDnDState.dragSourcePath
-    ? isSamePath(treeDnDState.dragSourcePath, workspace.rootPath)
-    : false;
-  const rootVisual = workspace
-    ? resolveDirectoryVisual(workspace.rootName, rootExpanded, true)
-    : null;
-  const contextMenuOnRoot = workspace && treeContextMenu
-    ? isSamePath(treeContextMenu.path, workspace.rootPath)
-    : false;
+  const workbenchStyle = useMemo(() => {
+    const scaledFontSizeXs = Math.round(typography.uiFontSize.xs * uiScale);
+    const scaledFontSizeSm = Math.round(typography.uiFontSize.sm * uiScale);
+    const scaledFontSizeBase = Math.round(typography.uiFontSize.base * uiScale);
+    const scaledFontSizeLg = Math.round(typography.uiFontSize.lg * uiScale);
+    const scaledIconSizeSm = Math.round(UI_ICON_SIZE_SM_BASE * uiScale);
+    const scaledIconSizeMd = Math.round(UI_ICON_SIZE_MD_BASE * uiScale);
+    const scaledIconSizeLg = Math.round(UI_ICON_SIZE_LG_BASE * uiScale);
+    const scaledActivityBarWidth = Math.round(UI_ACTIVITY_BAR_WIDTH_BASE * uiScale);
+    const scaledActivityButtonSize = Math.round(UI_ACTIVITY_BUTTON_SIZE_BASE * uiScale);
+    const scaledActivityIconSize = Math.round(UI_ACTIVITY_ICON_SIZE_BASE * uiScale);
+    const scaledActivityBarPaddingX = Math.round(UI_ACTIVITY_BAR_PADDING_X_BASE * uiScale);
+    const scaledActivityBarGap = Math.round(UI_ACTIVITY_BAR_GAP_BASE * uiScale);
+    const scaledActivityBadgeSize = Math.round(UI_ACTIVITY_BADGE_SIZE_BASE * uiScale);
+    return {
+      "--explorer-width": `${explorerWidth}px`,
+      "--ui-scale": uiScale.toFixed(2),
+      "--ui-font-size-xs": `${scaledFontSizeXs}px`,
+      "--ui-font-size-sm": `${scaledFontSizeSm}px`,
+      "--ui-font-size-base": `${scaledFontSizeBase}px`,
+      "--ui-font-size-lg": `${scaledFontSizeLg}px`,
+      "--ui-icon-size-sm": `${scaledIconSizeSm}px`,
+      "--ui-icon-size-md": `${scaledIconSizeMd}px`,
+      "--ui-icon-size-lg": `${scaledIconSizeLg}px`,
+      "--activity-bar-width": `${scaledActivityBarWidth}px`,
+      "--ui-activity-button-size": `${scaledActivityButtonSize}px`,
+      "--ui-activity-icon-size": `${scaledActivityIconSize}px`,
+      "--ui-activity-bar-padding-x": `${scaledActivityBarPaddingX}px`,
+      "--ui-activity-bar-gap": `${scaledActivityBarGap}px`,
+      "--ui-activity-badge-size": `${scaledActivityBadgeSize}px`,
+    } as CSSProperties;
+  }, [explorerWidth, typography.uiFontSize.base, typography.uiFontSize.lg, typography.uiFontSize.sm, typography.uiFontSize.xs, uiScale]);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={workbenchStyle}>
       <header className="window-bar" data-tauri-drag-region>
         <div className="window-drag" data-tauri-drag-region>
           <img className="brand-icon" src="/icon.png" alt="VEXC" draggable={false} />
@@ -3551,7 +3611,7 @@ function App() {
               aria-expanded={activeHeaderMenuId === "file"}
               onClick={() => toggleHeaderMenu("file")}
             >
-              <File size={14} aria-hidden="true" />
+              <File size={ICON_SIZE_SM} aria-hidden="true" />
             </button>
             {activeHeaderMenuId === "file" ? (
               <div className="menu-panel" role="menu" aria-label="文件菜单">
@@ -3582,23 +3642,45 @@ function App() {
             <button
               type="button"
               className="menu-tab titlebar-action-button"
-              title={`减小字体 (${fontSize}px)`}
-              aria-label="减小字体"
-              onClick={() => adjustFontSize(-1)}
-              disabled={fontSize <= MIN_FONT_SIZE}
+              title={`减小界面字号 (${Math.round(uiScale * 100)}%)`}
+              aria-label="减小界面字号"
+              onClick={() => adjustUiScale(-UI_SCALE_STEP)}
+              disabled={uiScale <= MIN_UI_SCALE}
             >
-              <AArrowDown size={14} aria-hidden="true" />
+              <AArrowDown size={ICON_SIZE_SM} aria-hidden="true" />
             </button>
 
             <button
               type="button"
               className="menu-tab titlebar-action-button"
-              title={`增大字体 (${fontSize}px)`}
-              aria-label="增大字体"
-              onClick={() => adjustFontSize(1)}
-              disabled={fontSize >= MAX_FONT_SIZE}
+              title={`增大界面字号 (${Math.round(uiScale * 100)}%)`}
+              aria-label="增大界面字号"
+              onClick={() => adjustUiScale(UI_SCALE_STEP)}
+              disabled={uiScale >= MAX_UI_SCALE}
             >
-              <AArrowUp size={14} aria-hidden="true" />
+              <AArrowUp size={ICON_SIZE_SM} aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              className="menu-tab titlebar-action-button"
+              title={`减小编辑器字号 (${codeFontSize}px)`}
+              aria-label="减小编辑器字号"
+              onClick={() => adjustCodeFontSize(-1)}
+              disabled={codeFontSize <= typography.codeFontSize.min}
+            >
+              <AArrowDown size={ICON_SIZE_SM} aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              className="menu-tab titlebar-action-button"
+              title={`增大编辑器字号 (${codeFontSize}px)`}
+              aria-label="增大编辑器字号"
+              onClick={() => adjustCodeFontSize(1)}
+              disabled={codeFontSize >= typography.codeFontSize.max}
+            >
+              <AArrowUp size={ICON_SIZE_SM} aria-hidden="true" />
             </button>
 
             <button
@@ -3608,7 +3690,7 @@ function App() {
               aria-label="切换侧边栏"
               onClick={() => toggleExplorerVisibility()}
             >
-              <FolderSearch size={14} aria-hidden="true" />
+              <FolderSearch size={ICON_SIZE_SM} aria-hidden="true" />
             </button>
 
             <HeaderSignals
@@ -3628,7 +3710,7 @@ function App() {
             aria-label="Minimize window"
             onClick={() => void handleWindowMinimize()}
           >
-            <Minus size={14} strokeWidth={1.9} className="window-control-icon" />
+            <Minus size={ICON_SIZE_SM} strokeWidth={1.9} className="window-control-icon" />
           </button>
           <button
             type="button"
@@ -3637,9 +3719,9 @@ function App() {
             onClick={() => void handleWindowToggleMaximize()}
           >
             {isWindowMaximized ? (
-              <Copy size={14} strokeWidth={1.9} className="window-control-icon" />
+              <Copy size={ICON_SIZE_SM} strokeWidth={1.9} className="window-control-icon" />
             ) : (
-              <Square size={13} strokeWidth={1.9} className="window-control-icon" />
+              <Square size={ICON_SIZE_SM} strokeWidth={1.9} className="window-control-icon" />
             )}
           </button>
           <button
@@ -3648,7 +3730,7 @@ function App() {
             aria-label="Close window"
             onClick={() => void handleWindowClose()}
           >
-            <X size={14} strokeWidth={1.9} className="window-control-icon" />
+            <X size={ICON_SIZE_SM} strokeWidth={1.9} className="window-control-icon" />
           </button>
         </div>
       </header>
@@ -3660,446 +3742,88 @@ function App() {
           onActivateSidebarView={activateSidebarView}
         />
 
-        <aside className="explorer-panel">
-          {sidebarView === "explorer" ? (
-            <>
-              <div className="explorer-toolbar">
-                <span className="sidebar-section-title">资源管理器</span>
-                <div className="explorer-toolbar-actions">
-                  <button
-                    type="button"
-                    className="explorer-action icon-only"
-                    title="新建文件"
-                    aria-label="新建文件"
-                    disabled={!workspace}
-                    onClick={() => void promptCreateNode("file")}
-                  >
-                    <FilePlus2 size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="explorer-action icon-only"
-                    title="新建文件夹"
-                    aria-label="新建文件夹"
-                    disabled={!workspace}
-                    onClick={() => void promptCreateNode("directory")}
-                  >
-                    <FolderPlus size={14} />
-                  </button>
-                </div>
-              </div>
-
-              {workspace ? (
-                <div className="explorer-root">
-                  <div
-                    className="tree-row tree-row-root"
-                    data-tree-drop-path={workspace.rootPath}
-                  >
-                    <button
-                      type="button"
-                      className={`tree-item root ${rootSelected ? "selected" : ""} ${
-                        rootDraggingSource ? "dragging-source" : ""
-                      } ${rootValidDropTarget ? "drop-target-valid drop-target" : ""} ${
-                        rootInvalidDropTarget ? "drop-target-invalid" : ""
-                      }`}
-                      onPointerDown={(event) =>
-                        handleTreePointerDown(event, { path: workspace.rootPath, kind: "directory" })}
-                      onContextMenu={(event) => openTreeContextMenu(event, workspace.rootPath, "directory")}
-                      onClick={() => {
-                        if (consumeTreeDragClickSuppression()) {
-                          return;
-                        }
-
-                        setSelectedTreePath(workspace.rootPath);
-                        setSelectedTreeKind("directory");
-                        closeTreeContextMenu();
-
-                        const expanded = !rootExpanded;
-                        setExpandedByPath((previous) => ({
-                          ...previous,
-                          [workspace.rootPath]: expanded,
-                        }));
-                        if (expanded && !treeByPath[workspace.rootPath]) {
-                          void loadDirectory(workspace.rootPath);
-                        }
-                      }}
-                    >
-                      <span className={`tree-marker tone-${rootVisual?.tone ?? "default"}`}>
-                        {rootVisual?.icon ?? <Folder size={14} />}
-                      </span>
-                      <span className="tree-label">{workspace.rootName}</span>
-                    </button>
-                  </div>
-                  {rootExpanded ? (
-                    <div>{renderTree(treeByPath[workspace.rootPath] ?? [], 1, workspace.rootPath)}</div>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="empty-text">Open a workspace to browse files.</p>
-              )}
-
-              {treeContextMenu ? (
-                <div
-                  ref={treeContextMenuRef}
-                  className="tree-context-menu"
-                  role="menu"
-                  style={{ top: `${treeContextMenu.y}px`, left: `${treeContextMenu.x}px` }}
-                >
-                  {treeContextMenu.kind === "directory" ? (
-                    <>
-                      <button
-                        type="button"
-                        className="tree-context-item"
-                        role="menuitem"
-                        onClick={() =>
-                          runTreeContextAction(() =>
-                            promptCreateNode("file", treeContextMenu.path, treeContextMenu.kind),
-                          )}
-                      >
-                        <FilePlus2 size={14} />
-                        <span>新建文件</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="tree-context-item"
-                        role="menuitem"
-                        onClick={() =>
-                          runTreeContextAction(() =>
-                            promptCreateNode("directory", treeContextMenu.path, treeContextMenu.kind),
-                          )}
-                      >
-                        <FolderPlus size={14} />
-                        <span>新建文件夹</span>
-                      </button>
-                      {!contextMenuOnRoot ? <div className="tree-context-separator" /> : null}
-                    </>
-                  ) : null}
-
-                  {!contextMenuOnRoot ? (
-                    <button
-                      type="button"
-                      className="tree-context-item"
-                      role="menuitem"
-                      onClick={() =>
-                        runTreeContextAction(() => handleRenameTreePath(treeContextMenu.path, treeContextMenu.kind))}
-                    >
-                      <Pencil size={14} />
-                      <span>重命名</span>
-                    </button>
-                  ) : null}
-
-                  {!contextMenuOnRoot ? (
-                    <button
-                      type="button"
-                      className="tree-context-item danger"
-                      role="menuitem"
-                      onClick={() =>
-                        runTreeContextAction(() => handleDeleteTreePath(treeContextMenu.path, treeContextMenu.kind))}
-                    >
-                      <Trash2 size={14} />
-                      <span>删除</span>
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="scm-panel">
-              <div className="scm-panel-header">
-                <span className="sidebar-section-title">源代码管理</span>
-              </div>
-              {!workspace ? (
-                <p className="empty-text">Open a workspace to use source control.</p>
-              ) : (
-                <>
-                  <div className="scm-toolbar">
-                    <span className="scm-branch-label">
-                      {gitRepo?.isRepo ? (gitRepo.branch ?? "HEAD") : "No Git Repository"}
-                    </span>
-                    <button
-                      type="button"
-                      className="scm-button"
-                      disabled={isGitActionPending || isGitRefreshing}
-                      onClick={() => void refreshGitState()}
-                    >
-                      刷新
-                    </button>
-                  </div>
-
-                  {gitRepo?.isRepo ? (
-                    <>
-                      <div className="scm-sync-row">
-                        <span className="scm-sync-meta">
-                          ↑ {gitRepo.ahead} / ↓ {gitRepo.behind}
-                        </span>
-                        <div className="scm-sync-actions">
-                          <button
-                            type="button"
-                            className="scm-button"
-                            disabled={isGitActionPending || isGitRefreshing}
-                            onClick={() => void handleGitPullAction()}
-                          >
-                            Pull
-                          </button>
-                          <button
-                            type="button"
-                            className="scm-button"
-                            disabled={isGitActionPending || isGitRefreshing}
-                            onClick={() => void handleGitPushAction()}
-                          >
-                            Push
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="scm-branch-row">
-                        <select
-                          className="scm-branch-select"
-                          value={gitBranchState.currentBranch ?? ""}
-                          disabled={
-                            isGitActionPending
-                            || isGitRefreshing
-                            || gitBranchState.branches.length === 0
-                          }
-                          onChange={(event) => void handleGitCheckoutBranch(event.target.value)}
-                        >
-                          {gitBranchState.currentBranch ? null : (
-                            <option value="" disabled>
-                              Select branch
-                            </option>
-                          )}
-                          {gitBranchState.branches.map((branch) => (
-                            <option
-                              key={`${branch.isRemote ? "remote" : "local"}:${branch.name}`}
-                              value={branch.name}
-                            >
-                              {branch.isRemote ? `remote/${branch.name}` : branch.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="scm-commit">
-                        <textarea
-                          className="scm-commit-input"
-                          value={gitCommitMessage}
-                          placeholder="Commit message"
-                          disabled={isGitActionPending || isGitRefreshing}
-                          onChange={(event) => setGitCommitMessage(event.target.value)}
-                        />
-                        <button
-                          type="button"
-                          className="scm-button scm-button-primary"
-                          disabled={!gitCommitMessage.trim() || isGitActionPending || isGitRefreshing}
-                          onClick={() => void handleGitCommitSubmit()}
-                        >
-                          Commit
-                        </button>
-                      </div>
-
-                      <div className="scm-section">
-                        <div className="scm-section-head">
-                          <span>Staged ({gitStagedChanges.length})</span>
-                          <button
-                            type="button"
-                            className="scm-button"
-                            disabled={gitStagedChanges.length === 0 || isGitActionPending || isGitRefreshing}
-                            onClick={() => void unstageGitPaths(gitStagedChanges.map((change) => change.path))}
-                          >
-                            Unstage All
-                          </button>
-                        </div>
-                        {gitStagedChanges.length > 0 ? (
-                          <div className="scm-change-list">
-                            {gitStagedChanges.map((change) => {
-                              const selected = Boolean(
-                                gitSelectedDiffPath
-                                  && isSamePath(gitSelectedDiffPath, change.path)
-                                  && gitSelectedDiffStaged,
-                              );
-                              return (
-                                <div
-                                  key={`staged:${change.path}:${change.statusCode}`}
-                                  className={`scm-change-item ${selected ? "selected" : ""}`}
-                                >
-                                  <button
-                                    type="button"
-                                    className="scm-change-main"
-                                    title={change.path}
-                                    onClick={() => void loadGitDiffPreview(change.path, true)}
-                                  >
-                                    <span className="scm-change-code">{labelForGitChange(change)}</span>
-                                    <span className="scm-change-name">
-                                      {relativePathWithinWorkspace(change.path, workspace.rootPath)}
-                                    </span>
-                                  </button>
-                                  <div className="scm-change-actions">
-                                    <button
-                                      type="button"
-                                      className="scm-button"
-                                      disabled={isGitActionPending || isGitRefreshing}
-                                      onClick={() => void unstageGitPaths([change.path])}
-                                    >
-                                      Unstage
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <p className="empty-text">No staged changes.</p>
-                        )}
-                      </div>
-
-                      <div className="scm-section">
-                        <div className="scm-section-head">
-                          <span>Changes ({gitUnstagedChanges.length})</span>
-                          <button
-                            type="button"
-                            className="scm-button"
-                            disabled={gitUnstagedChanges.length === 0 || isGitActionPending || isGitRefreshing}
-                            onClick={() => void stageGitPaths(gitUnstagedChanges.map((change) => change.path))}
-                          >
-                            Stage All
-                          </button>
-                        </div>
-                        {gitUnstagedChanges.length > 0 ? (
-                          <div className="scm-change-list">
-                            {gitUnstagedChanges.map((change) => {
-                              const selected = Boolean(
-                                gitSelectedDiffPath
-                                  && isSamePath(gitSelectedDiffPath, change.path)
-                                  && !gitSelectedDiffStaged,
-                              );
-                              return (
-                                <div
-                                  key={`changes:${change.path}:${change.statusCode}`}
-                                  className={`scm-change-item ${selected ? "selected" : ""}`}
-                                >
-                                  <button
-                                    type="button"
-                                    className="scm-change-main"
-                                    title={change.path}
-                                    onClick={() => void loadGitDiffPreview(change.path, false)}
-                                  >
-                                    <span className="scm-change-code">{labelForGitChange(change)}</span>
-                                    <span className="scm-change-name">
-                                      {relativePathWithinWorkspace(change.path, workspace.rootPath)}
-                                    </span>
-                                  </button>
-                                  <div className="scm-change-actions">
-                                    <button
-                                      type="button"
-                                      className="scm-button"
-                                      disabled={isGitActionPending || isGitRefreshing}
-                                      onClick={() => void stageGitPaths([change.path])}
-                                    >
-                                      Stage
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="scm-button danger"
-                                      disabled={isGitActionPending || isGitRefreshing}
-                                      onClick={() => void discardGitPaths([change.path])}
-                                    >
-                                      Discard
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <p className="empty-text">No unstaged changes.</p>
-                        )}
-                      </div>
-
-                      <div className="scm-section">
-                        <div className="scm-section-head">
-                          <span>Untracked ({gitUntrackedChanges.length})</span>
-                        </div>
-                        {gitUntrackedChanges.length > 0 ? (
-                          <div className="scm-change-list">
-                            {gitUntrackedChanges.map((change) => (
-                              <div
-                                key={`untracked:${change.path}:${change.statusCode}`}
-                                className="scm-change-item"
-                              >
-                                <button
-                                  type="button"
-                                  className="scm-change-main"
-                                  title={change.path}
-                                  onClick={() => void loadGitDiffPreview(change.path, false)}
-                                >
-                                  <span className="scm-change-code">{labelForGitChange(change)}</span>
-                                  <span className="scm-change-name">
-                                    {relativePathWithinWorkspace(change.path, workspace.rootPath)}
-                                  </span>
-                                </button>
-                                <div className="scm-change-actions">
-                                  <button
-                                    type="button"
-                                    className="scm-button"
-                                    disabled={isGitActionPending || isGitRefreshing}
-                                    onClick={() => void stageGitPaths([change.path])}
-                                  >
-                                    Stage
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="scm-button danger"
-                                    disabled={isGitActionPending || isGitRefreshing}
-                                    onClick={() => void discardGitPaths([change.path])}
-                                  >
-                                    Discard
-                                  </button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="empty-text">No untracked files.</p>
-                        )}
-                      </div>
-
-                      <div className="scm-diff-panel">
-                        <div className="scm-section-head">
-                          <span>Diff Preview</span>
-                          {gitSelectedDiffPath ? (
-                            <button
-                              type="button"
-                              className="scm-button"
-                              disabled={isGitActionPending || isGitRefreshing}
-                              onClick={() => void openFile(gitSelectedDiffPath)}
-                            >
-                              Open File
-                            </button>
-                          ) : null}
-                        </div>
-                        {gitSelectedDiffPath ? (
-                          <>
-                            <p className="scm-diff-path">
-                              {relativePathWithinWorkspace(gitSelectedDiffPath, workspace.rootPath)}
-                              {gitSelectedDiffStaged ? " (staged)" : " (working tree)"}
-                            </p>
-                            <pre className="scm-diff-content">
-                              {gitDiffText || "No diff content for this file."}
-                            </pre>
-                          </>
-                        ) : (
-                          <p className="empty-text">Select a change to preview its diff.</p>
-                        )}
-                      </div>
-                    </>
-                  ) : (
-                    <p className="empty-text">Current workspace is not a Git repository.</p>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-        </aside>
+        <WorkbenchSidebar
+          sidebarView={sidebarView}
+          workspace={workspace}
+          treeByPath={treeByPath}
+          treeContextMenu={treeContextMenu}
+          treeContextMenuRef={treeContextMenuRef}
+          gitRepo={gitRepo}
+          gitBranchState={gitBranchState}
+          gitCommitMessage={gitCommitMessage}
+          gitStagedChanges={gitStagedChanges}
+          gitUnstagedChanges={gitUnstagedChanges}
+          gitUntrackedChanges={gitUntrackedChanges}
+          gitSelectedDiffPath={gitSelectedDiffPath}
+          gitSelectedDiffStaged={gitSelectedDiffStaged}
+          gitDiffText={gitDiffText}
+          isGitActionPending={isGitActionPending}
+          isGitRefreshing={isGitRefreshing}
+          renderTree={renderTree}
+          onCreateNode={(kind) => {
+            void promptCreateNode(kind);
+          }}
+          onTreeContextCreateFile={() => {
+            if (!treeContextMenu) {
+              return;
+            }
+            runTreeContextAction(() =>
+              promptCreateNode("file", treeContextMenu.path, treeContextMenu.kind));
+          }}
+          onTreeContextCreateDirectory={() => {
+            if (!treeContextMenu) {
+              return;
+            }
+            runTreeContextAction(() =>
+              promptCreateNode("directory", treeContextMenu.path, treeContextMenu.kind));
+          }}
+          onTreeContextRename={() => {
+            if (!treeContextMenu) {
+              return;
+            }
+            runTreeContextAction(() => handleRenameTreePath(treeContextMenu.path, treeContextMenu.kind));
+          }}
+          onTreeContextDelete={() => {
+            if (!treeContextMenu) {
+              return;
+            }
+            runTreeContextAction(() => handleDeleteTreePath(treeContextMenu.path, treeContextMenu.kind));
+          }}
+          onRefreshGit={() => {
+            void refreshGitState();
+          }}
+          onGitPull={() => {
+            void handleGitPullAction();
+          }}
+          onGitPush={() => {
+            void handleGitPushAction();
+          }}
+          onGitCheckoutBranch={(branchName) => {
+            void handleGitCheckoutBranch(branchName);
+          }}
+          onGitCommitMessageChange={setGitCommitMessage}
+          onGitCommit={() => {
+            void handleGitCommitSubmit();
+          }}
+          onStageGitPaths={(paths) => {
+            void stageGitPaths(paths);
+          }}
+          onUnstageGitPaths={(paths) => {
+            void unstageGitPaths(paths);
+          }}
+          onDiscardGitPaths={(paths) => {
+            void discardGitPaths(paths);
+          }}
+          onLoadGitDiffPreview={(path, staged) => {
+            void loadGitDiffPreview(path, staged);
+          }}
+          onOpenFile={(path) => {
+            void openFile(path);
+          }}
+          relativePathWithinWorkspace={relativePathWithinWorkspace}
+          isSamePath={isSamePath}
+          labelForGitChange={labelForGitChange}
+        />
 
         <div
           className="explorer-resizer"
@@ -4146,9 +3870,9 @@ function App() {
                   options={{
                     automaticLayout: true,
                     minimap: { enabled: false },
-                    fontFamily: CODE_FONT_FAMILY,
-                    fontSize: fontSize,
-                    lineHeight: Math.round(fontSize * CODE_LINE_HEIGHT_RATIO),
+                    fontFamily: typography.codeFontFamily,
+                    fontSize: codeFontSize,
+                    lineHeight: Math.round(codeFontSize * typography.codeLineHeightRatio),
                     tabSize: 2,
                     insertSpaces: true,
                     wordWrap: "on",
@@ -4186,16 +3910,9 @@ function App() {
       <section ref={signalsPanelRef} className="signals-panel-anchor">
         <SignalsPanel
           open={outputState.panelOpen}
-          activeTab={outputState.activeTab}
-          statusMessage={statusMessage}
           problems={problems}
-          outputEntries={visibleOutputEntries}
-          outputLevelFilter={outputLevelFilter}
           onClose={closeSignalsPanel}
-          onTabChange={selectSignalsTab}
-          onOutputLevelFilterChange={setOutputLevelFilter}
           onSelectProblem={jumpToProblem}
-          onClearOutput={clearSignalOutputs}
         />
       </section>
 
@@ -4204,3 +3921,4 @@ function App() {
 }
 
 export default App;
+

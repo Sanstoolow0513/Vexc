@@ -1,4 +1,5 @@
 import { AlertTriangle, Bell, CircleAlert } from "lucide-react";
+import { ICON_SIZE_SM } from "../iconSizes";
 
 import type { EditorSignalState } from "../types";
 
@@ -28,17 +29,17 @@ export function HeaderSignals({
     <button
       type="button"
       className={`menu-tab signals-trigger ${signal.panelOpen ? "active" : ""} ${severityClassName}`}
-      title="Problems / Output"
-      aria-label="Open problems and output panel"
+      title="Errors"
+      aria-label="Open errors panel"
       aria-haspopup="dialog"
       aria-expanded={signal.panelOpen}
       onClick={onTogglePanel}
     >
       {errorCount > 0
-        ? <CircleAlert size={14} aria-hidden="true" />
+        ? <CircleAlert size={ICON_SIZE_SM} aria-hidden="true" />
         : warningCount > 0
-          ? <AlertTriangle size={14} aria-hidden="true" />
-          : <Bell size={14} aria-hidden="true" />}
+          ? <AlertTriangle size={ICON_SIZE_SM} aria-hidden="true" />
+          : <Bell size={ICON_SIZE_SM} aria-hidden="true" />}
       {totalBadge > 0 ? (
         <span className={`signals-badge ${severityClassName}`}>
           {totalBadge > 99 ? "99+" : totalBadge}
@@ -47,3 +48,4 @@ export function HeaderSignals({
     </button>
   );
 }
+

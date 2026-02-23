@@ -8,6 +8,7 @@ import {
 import type { FileKind } from "../../types";
 
 const TREE_DROP_TARGET_SELECTOR = "[data-tree-drop-path]";
+const EXPLORER_ROOT_DROP_SELECTOR = "[data-explorer-root-drop-path]";
 const CLICK_SUPPRESSION_TIMEOUT_MS = 0;
 const DROP_TARGET_GRACE_MS = 80;
 
@@ -21,7 +22,6 @@ export type TreeDnDStatus = "idle" | "arming" | "dragging" | "committing";
 export type TreeDropRejectionReason =
   | "missing-source"
   | "same-path"
-  | "same-parent"
   | "target-inside-source";
 
 export interface DropValidationResult {
@@ -75,12 +75,27 @@ function resolveDropTargetPathFromDom(clientX: number, clientY: number): string 
   }
 
   const dropTargetElement = elementAtPointer.closest<HTMLElement>(TREE_DROP_TARGET_SELECTOR);
-  const targetDirectoryPath = dropTargetElement?.dataset.treeDropPath;
-  if (!targetDirectoryPath || !targetDirectoryPath.trim()) {
+  if (dropTargetElement) {
+    const targetDirectoryPath = dropTargetElement.dataset.treeDropPath;
+    if (targetDirectoryPath && targetDirectoryPath.trim()) {
+      return targetDirectoryPath;
+    }
+  }
+
+  const treeItem = elementAtPointer.closest(".tree-item");
+  if (treeItem) {
     return null;
   }
 
-  return targetDirectoryPath;
+  const explorerRoot = elementAtPointer.closest<HTMLElement>(EXPLORER_ROOT_DROP_SELECTOR);
+  if (explorerRoot) {
+    const rootPath = explorerRoot.dataset.explorerRootDropPath;
+    if (rootPath && rootPath.trim()) {
+      return rootPath;
+    }
+  }
+
+  return null;
 }
 
 function buildDropRejectionSignature(

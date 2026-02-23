@@ -1,0 +1,17 @@
+{
+  "uiFontFamily": "\"Space Grotesk\", \"Inter\", \"Segoe UI\", sans-serif",
+  "codeFontFamily": "\"JetBrains Mono\", \"Cascadia Code\", Consolas, monospace",
+  "uiFontSize": {
+    "xs": 11,
+    "sm": 12,
+    "base": 13,
+    "lg": 14
+  },
+  "codeFontSize": {
+    "default": 13,
+    "min": 10,
+    "max": 24
+  },
+  "codeLineHeightRatio": 1.3846153846,
+  "terminalLineHeightRatio": 1
+}
